@@ -77,8 +77,10 @@ struct Soldier {
     var pace: Double { reloading ? kind.walkSpeed*0.5 : kind.walkSpeed }
 }
 /// A round in flight. Rockets fall under their own, weaker `gravity` and trail smoke.
+/// A round with a `fuse` bursts on reaching that x even if it hit nothing, so cannon rounds
+/// whose target was blasted away while they flew don't sail on past the strafed strip.
 struct Shot { var position: Vec; var previous: Vec; var velocity: Vec; var life: Double = 0; var radius = World.bulletBlastRadius
-    var gravity = World.gravity; var rocket = false }
+    var gravity = World.gravity; var rocket = false; var fuse: Double? = nil }
 struct Particle { var position: Vec; var velocity: Vec; var life: Double; var total: Double; var kind: Int; var size: Double }
 struct Blast { var position: Vec; var age: Double = 0; var radius: Double }
 /// Decorative wall panel drawn on a surviving rear wall.
@@ -117,6 +119,14 @@ final class World {
     var worth = [UInt8](repeating: 0, count: columns*rows)
     /// Reinforced foundation cells: ground slabs, bridge piers, and the footings sunk beneath them.
     var footings = [Bool](repeating: false, count: columns*rows)
+    /// Steel reinforcing bars cast inside concrete: 0 for none, otherwise the bar material
+    /// (`barH` in slabs, `barV` in walls and columns) left standing where the concrete
+    /// around it is blasted or burnt away. See `layRebar`.
+    var rebar = [UInt8](repeating: 0, count: columns*rows)
+    /// How strongly this level's buildings are reinforced; 1 is the first level, and later,
+    /// harder levels raise it. Rebar concrete resists blasts, carries load, spans and leans
+    /// further in proportion, and exposed bars hold more before they buckle.
+    var reinforcement = 1.0
     var objectives: [Objective] = []
     var popups: [Popup] = []
     var score = 0
@@ -125,6 +135,8 @@ final class World {
     /// Credits: the separate currency troops and support are bought with. Granted at the
     /// start of each round and never earned mid-round; points are only for extraction.
     var credits = 0
+    /// Dev mode: purchases are free, support and RPGs never cool down, nothing is banked.
+    var devMode = false
     /// Part of this round's credits paid out for the last round's points.
     var carriedCredits = 0
     /// Part of this round's credits withdrawn from the bank, after the transfer loss.
@@ -148,6 +160,13 @@ final class World {
     var crates: [SupplyCrate] = []
     var planes: [SupplyPlane] = []
     var jets: [StrafeJet] = []
+    /// Height of the tallest block still standing; support aircraft fly well above it.
+    var skyline = World.top
+    /// Heading forced on support aircraft (+1 in from the west, -1 from the east), or nil to
+    /// bring them in from the edge nearer the call-in point.
+    var supportSide: Double?
+    /// Seconds until `skyline` is measured again.
+    var skylineClock = 0.0
     /// Seconds until another gun run can be called. Other support has no cooldown.
     var gunRunCooldown = 0.0
     /// Seconds until another firebomb run can be called.
@@ -207,7 +226,7 @@ final class World {
         let (x,y,w,h) = (x*unit,y*unit,w*unit,h*unit)
         guard w > 0 && h > 0 else { return }
         for row in max(0,y)..<min(Self.rows,y+h) {
-            for col in max(0,x)..<min(Self.columns,x+w) { voxels[index(col,row)] = m }
+            for col in max(0,x)..<min(Self.columns,x+w) { voxels[index(col,row)] = m; rebar[index(col,row)] = 0 }
         }
     }
     func carve(_ cx: Int, _ cy: Int, _ rx: Int, _ ry: Int) {
@@ -349,8 +368,9 @@ final class World {
         backdrops = [Int](repeating: -1, count: Self.columns*Self.rows)
         ceilings = [Int](repeating: -1, count: Self.columns*Self.rows)
         footings = [Bool](repeating: false, count: Self.columns*Self.rows)
+        rebar = [UInt8](repeating: 0, count: Self.columns*Self.rows)
         rooms = []; roomOf = [Int32](repeating: -1, count: Self.columns*Self.rows)
-        soldiers = []; shots = []; particles = []; blasts = []; crates = []; planes = []; jets = []; gunRunCooldown = 0; target = nil
+        soldiers = []; shots = []; particles = []; blasts = []; crates = []; planes = []; jets = []; gunRunCooldown = 0; skylineClock = 0; supportSide = nil; target = nil
         resetFire()
         elapsed = 0; destroyed = 0; rounds = 0; nextID = 1; paused = false; speed = 1; seed = 42
         status = "PRESS E OR CLICK DEPLOY TO SPEND CREDITS ON TROOPS"
@@ -430,6 +450,7 @@ final class World {
         fill(630, 33, 34, 5, 3)
         fill(650, 43, 4, 4, 7); fill(655, 44, 4, 3, 7); fill(667, 45, 7, 2, 6)
         fixtures += [Fixture(x:623,y:42,w:6,h:3),Fixture(x:640,y:26,w:5,h:3)]
+        layRebar()
         findPanes()
         fixtures = fixtures.map { Fixture(x:$0.x*S,y:$0.y*S,w:$0.w*S,h:$0.h*S) }
         pools = pools.map { Pool(x0:$0.x0*S,x1:$0.x1*S+S-1,row:$0.row*S) }
@@ -461,6 +482,8 @@ final class World {
     }
     /// Body height in cells that a standing soldier needs clear.
     static let bodyCells = 6
+    /// Tallest step, in cells, a soldier scrambles up: anything no taller than the soldier.
+    static let climbCells = bodyCells
     func bodyBlocked(x: Double, y: Double, sign: Double) -> Bool {
         var h = 1.0
         while h < Soldier.height {
@@ -469,16 +492,14 @@ final class World {
         }
         return false
     }
-    /// A standing spot: feet in empty cell (c,r) on solid ground with room for the body.
+    /// A standing spot: feet in empty cell (c,r) on solid ground with room for the body, and
+    /// not pressed against a wall too tall to climb (a climbable step beside it is fine).
     func standable(_ c: Int, _ r: Int) -> Bool {
-        guard c >= 1 && c < Self.columns-1 && r >= Self.bodyCells && r+1 < Self.rows, troopSolid(c,r+1) else { return false }
-        for k in 0..<Self.bodyCells {
-            if troopSolid(c,r-k) { return false }
-            if k >= 4 && (troopSolid(c-1,r-k) || troopSolid(c+1,r-k)) { return false }
-        }
-        return true
+        guard c >= 1 && c < Self.columns-1 && r >= Self.climbCells && r+1 < Self.rows, troopSolid(c,r+1) else { return false }
+        for k in 0..<Self.bodyCells where troopSolid(c,r-k) { return false }
+        return !troopSolid(c-1,r-Self.climbCells) && !troopSolid(c+1,r-Self.climbCells)
     }
-    /// Breadth-first search over standing spots: step up four cells, drop any distance.
+    /// Breadth-first search over standing spots: step up `climbCells`, drop any distance.
     /// Returns the columns to walk through to the reachable spot nearest `goalX`.
     func plan(from p: Vec, to goalX: Double) -> [Int] {
         let cols = Self.columns, goal = max(1,min(cols-2,Int(goalX/Self.cell)))
@@ -496,9 +517,10 @@ final class World {
             for dir in [-1,1] {
                 let nc = c+dir
                 guard nc >= 1 && nc < cols-1, !troopSolid(nc,r-Self.bodyCells) else { continue }
-                var rr = r-4
+                var rr = r-Self.climbCells
                 while rr <= r+30 && rr+1 < Self.rows {
-                    if standable(nc,rr) { let m = rr*cols+nc; if parent[m] == nil { parent[m] = n; queue.append(m) }; break }
+                    // Climbing lifts the body above its current spot, so that column needs the headroom too.
+                    if standable(nc,rr) && (rr..<max(rr,r)).allSatisfy({ !troopSolid(c,$0-Self.bodyCells+1) }) { let m = rr*cols+nc; if parent[m] == nil { parent[m] = n; queue.append(m) }; break }
                     if troopSolid(nc,rr) { break }
                     rr += 1
                 }
@@ -508,15 +530,13 @@ final class World {
         while n != start && n >= 0 { path.append(n%cols); n = parent[n] ?? -1 }
         return path.reversed()
     }
-    static let maxSoldiers = 32
     /// Gap between neighbours in a line formation; idle troops edge apart until this far from each other.
     static let formationSpacing = 12.0
     /// Offset of rank `k` of `n` in a line formation centred on its rally point.
     static func formationOffset(_ k: Int, of n: Int) -> Double { (Double(k)-Double(n-1)/2)*formationSpacing }
     /// Adds soldiers in a line at the landing zone, or around `x` when given. Free: purchases go through `purchase`.
     func spawn(_ count: Int, kind: TroopKind = .rifleman, at x: Double? = nil) {
-        guard soldiers.count < Self.maxSoldiers else { status = "PLATOON LIMIT REACHED · 32 SOLDIERS"; return }
-        let n = min(count,Self.maxSoldiers-soldiers.count)
+        let n = count
         let centre = x ?? 128 + random*145
         for k in 0..<n {
             let px = min(Self.deployZone.upperBound,max(Self.deployZone.lowerBound,centre+Self.formationOffset(k,of:n)))
@@ -541,9 +561,9 @@ final class World {
     var rocketsSelected: Bool {
         soldiers.contains { $0.selected } && soldiers.allSatisfy { !$0.selected || $0.kind.manualAim }
     }
-    static let rocketSpeed = 640.0
+    static let rocketSpeed = 880.0
     /// Rockets are under thrust, so they sag far less than shells but still drop with range.
-    static let rocketGravity = 150.0
+    static let rocketGravity = 120.0
     /// Muzzle and launch velocity of a rocket `s` would fire at the pointer `aim`: straight
     /// toward it at `rocketSpeed`, then falling under `rocketGravity`, so it drops below the
     /// pointer at range and the player must aim high.
@@ -575,7 +595,7 @@ final class World {
             for _ in 0..<6 {
                 particles.append(Particle(position:origin+Vec(x:-velocity.x,y:-velocity.y)*0.04,velocity:Vec(x:-velocity.x*0.15+(random-0.5)*50,y:-velocity.y*0.15+(random-0.5)*50),life:0.6+random*0.6,total:1.5,kind:9,size:6+random*8))
             }
-            s.cooldown = s.kind.reload; s.flash = 0.12; s.ammo -= 1; rounds += 1
+            s.cooldown = devMode ? 0 : s.kind.reload; s.flash = 0.12; s.ammo -= 1; rounds += 1
             soldiers[i] = s; fired += 1
         }
         if fired > 0 {
@@ -691,12 +711,19 @@ final class World {
                 let distance = hypot(pos.x-p.x,pos.y-p.y)
                 // Ground resists blasts so shells leave shallow dents rather than pits soldiers must cross.
                 // Reinforced footings and bridge concrete shrug off part of each blast; loose rubble scatters easily.
-                let footing = (m == 3 || m == 12) && footings[index(x,y)]
-                if distance < radius * (m == 1 ? 0.5 : m == 2 ? 0.36 : footing ? 0.6 : m == 12 ? 0.8 : m == 10 ? Self.rubbleReach : 1.0) {
+                let i = index(x,y), footing = (m == 3 || m == 12) && footings[i]
+                // Rebar concrete shrugs off more of the blast the better the level reinforces it,
+                // and exposed bars only part in the heart of a blast.
+                let bars = m == 3 && rebar[i] != 0
+                let resist = m == 1 ? 0.5 : m == 2 ? 0.36 : footing ? 0.6 : bars ? 1/(1+0.2*reinforcement) : m == 12 ? 0.8 : m == 10 ? Self.rubbleReach : Self.isBar(m) ? 0.5 : 1.0
+                if distance < radius*resist {
                     if m == 4 { brokeGlass = true }
-                    gained += claim(index(x,y))
-                    voxels[index(x,y)] = 0; destroyed += 1
-                    particles.append(Particle(position:pos,velocity:Vec(x:(random-0.5)*200,y:-random*180-30),life:1.0+random,total:2,kind:Int(m),size:1.5+random*2))
+                    gained += claim(i)
+                    // Concrete blown off its bars leaves them standing, bent but still holding.
+                    let exposed = bars && distance > radius*0.35
+                    voxels[i] = exposed ? rebar[i] : 0; destroyed += 1
+                    if exposed { worth[i] = Self.points(rebar[i]) }
+                    particles.append(Particle(position:pos,velocity:Vec(x:(random-0.5)*200,y:-random*180-30),life:1.0+random,total:2,kind:Self.isBar(m) ? 11 : Int(m),size:1.5+random*2))
                 }
             }
         }
@@ -749,9 +776,10 @@ final class World {
                     else {
                         let sign = wx > s.position.x ? 1.0 : -1.0
                         let next = s.position.x+sign*min(s.pace*dt,abs(wx-s.position.x))
-                        // Scramble up ledges and rubble piles of up to four cells.
+                        // Scramble up ledges and rubble piles as tall as the soldier. The body test
+                        // looks 5 px ahead, up to two route columns, so allow two planned steps.
                         var y = s.position.y, lift = 0.0
-                        while lift < 4*Self.cell && bodyBlocked(x:next,y:y,sign:sign) { y -= Self.cell; lift += Self.cell }
+                        while lift < Double(2*Self.climbCells)*Self.cell && bodyBlocked(x:next,y:y,sign:sign) { y -= Self.cell; lift += Self.cell }
                         if bodyBlocked(x:next,y:y,sign:sign) {
                             // Terrain changed under the route (new rubble): plan again, give up if still jammed.
                             s.stuck += dt; s.routed = false
@@ -789,6 +817,7 @@ final class World {
                 shot.position = shot.position+shot.velocity*sub
                 if shot.position.x < 0 || shot.position.x > Self.width { shot.position.x = min(max(shot.position.x,0),Self.width); shot.velocity.x = 0 }
                 if material(at:shot.position) != 0 || shot.position.y >= Self.bottom { hit = true; break }
+                if let fuse = shot.fuse, (shot.position.x-fuse)*shot.velocity.x >= 0 && (shot.previous.x-fuse)*shot.velocity.x < 0 { hit = true; break }
             }
             if shot.rocket && !hit {
                 particles.append(Particle(position:shot.previous,velocity:Vec(x:(random-0.5)*16,y:(random-0.5)*16-8),life:0.7+random*0.5,total:1.4,kind:9,size:4+random*4))

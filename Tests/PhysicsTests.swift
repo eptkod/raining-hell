@@ -88,7 +88,9 @@ import Foundation
         perch.fill(52,66,40,4,3)
         perch.fill(70,56,20,10,3)
         perch.solveStructure()
-        check(perch.material(80*S,60*S) == 0 && perch.material(56*S,67*S) == 3,"building over a crater falls beyond its reach")
+        // The block outweighs the slab end resting on the lip, so the whole slab tips in.
+        check(perch.material(80*S,60*S) == 0 && perch.material(56*S,67*S) == 0,"building over a crater falls beyond its reach")
+        check(perch.chunks.count == 1 && perch.chunks[0].rooted && perch.chunks[0].hinge.map{ abs($0.x-60*World.cell*Double(S)) < 1 } == true,"a slab overbalanced past the crater lip tips in about the lip")
         // Debris rests on a window pane; too much of it snaps the pane and both halves
         // swing down from their frames before falling.
         func pane(_ rubble: Int) -> World {
@@ -149,6 +151,26 @@ import Foundation
         walk.move(680)
         for _ in 0..<900 { walk.update(1.0/60) }
         check(walk.soldiers[0].position.x > 670,"soldier climbs over a three-cell rubble pile")
+        // An earth bank as tall as the soldier is a step, not an obstacle; a taller one is not.
+        let wall=World(); wall.unit=1
+        let wy=wall.troopGround(at:590), wwr=Int((wy-World.top)/World.cell)
+        for c in wc..<wc+3 { for r in wwr-World.climbCells..<wwr { wall.voxels[wall.index(c,r)]=2 } }
+        wall.soldiers=[Soldier(id:1,position:Vec(x:560,y:wall.troopGround(at:560)))]
+        wall.soldiers[0].selected=true
+        wall.move(680)
+        for _ in 0..<900 { wall.update(1.0/60) }
+        check(wall.soldiers[0].position.x > 670,"soldier climbs a wall as tall as itself")
+        for c in wc..<wc+3 { wall.voxels[wall.index(c,wwr-World.climbCells-1)]=2 }
+        check(wall.plan(from:Vec(x:560,y:wall.troopGround(at:560)),to:680).allSatisfy{$0 < wc},"soldier will not plan up a wall taller than itself")
+        // A stair of full-height steps is climbable, even though the body test looks two columns ahead.
+        let stair=World(); stair.unit=1
+        let sy=stair.troopGround(at:590), swr=Int((sy-World.top)/World.cell)
+        for k in 0..<6 { for c in wc+k..<wc+12 { for r in swr-World.climbCells*(k+1)..<swr-World.climbCells*k { stair.voxels[stair.index(c,r)]=2 } } }
+        stair.soldiers=[Soldier(id:1,position:Vec(x:560,y:stair.troopGround(at:560)))]
+        stair.soldiers[0].selected=true
+        stair.move(Double(wc+11)*World.cell)
+        for _ in 0..<900 { stair.update(1.0/60) }
+        check(stair.soldiers[0].position.y < sy-Double(5*World.climbCells)*World.cell,"soldier climbs a steep stair of full-height steps")
         for c in wc+30..<wc+33 { for r in wr-30..<wr { walk.voxels[walk.index(c,r)]=3 } }
         walk.move(820)
         for _ in 0..<900 { walk.update(1.0/60) }
@@ -254,14 +276,24 @@ import Foundation
         dry.soldiers[0].ammo = 10
         check(dry.soldiers[0].lowAmmo && !World.offers.isEmpty,"a quarter load counts as low ammo")
         dry.soldiers[0].ammo = 0
-        let crate=World.support[0]
+        let crate=World.support[0], gunRunOffer=World.support[1]
         check(crate.cost == 150 && dry.purchase(crate,at:320) && dry.spent == crate.cost && dry.planes.count == 1 && dry.crates.isEmpty,"a supply crate costs 150 credits and is flown in")
         check(dry.refusal(crate) == nil,"supply crates have no cooldown")
         let skyline = stride(from:0.0,to:World.width,by:World.cell).map{ dry.ground(at:$0) }.min()!
-        check(World.planeAltitude+24 < skyline,"transports fly above the tallest structure, gear and ramp included")
+        check(dry.planes[0].y+24 < skyline-200,"transports fly far above the tallest structure, gear and ramp included")
         check(dry.planes[0].x <= -World.edgeMargin && dry.planes[0].heading == 1,"a drop on the west half is flown in from beyond the west edge")
         while dry.crates.isEmpty { dry.update(1.0/60) }
-        check(dry.crates[0].position.y < World.planeAltitude+30 && !dry.crates[0].landed,"the crate falls out of the plane overhead")
+        // Knocking down the tallest structures lowers the skyline, and planes in flight descend to follow it.
+        let felled=World(); felled.purchase(crate,at:600)
+        let highAlt=felled.transportAltitude, planeY=felled.planes[0].y
+        check(abs(planeY-highAlt) < 1 && highAlt+World.flightClearance <= skyline+1,"planes cruise a fixed clearance above the tallest standing block")
+        for x in 0..<World.columns {
+            for y in 0..<World.rows where Double(y)*World.cell+World.top < 330 { felled.voxels[felled.index(x,y)] = 0 }
+        }
+        for _ in 0..<120 { felled.update(1.0/60) }
+        check(felled.skyline > skyline+150 && felled.transportAltitude > highAlt+150,"the cruising height drops once the tall structures are gone")
+        check(felled.planes.isEmpty || felled.planes[0].y > planeY+40,"a plane in flight descends toward the new cruising height")
+        check(dry.crates[0].position.y < dry.planes[0].y+30 && !dry.crates[0].landed,"the crate falls out of the plane overhead")
         for _ in 0..<420 { dry.update(1.0/60) }
         check(dry.crates[0].landed && abs(dry.crates[0].position.x-320) < 24,"the drifting crate lands on the chosen spot")
         check(dry.planes.count == 1 && dry.planes[0].x > 320,"the plane flies on past the drop")
@@ -330,6 +362,11 @@ import Foundation
         let pileup=World(); for _ in 0..<5 { pileup.spawn(1,at:400) }
         for _ in 0..<600 { pileup.update(1.0/60) }
         check(gaps(pileup).allSatisfy{ $0 > World.formationSpacing-1 },"idle troops spawned on one spot edge apart into a line")
+        let sided=World(); sided.supportSide = -1; sided.purchase(crate,at:320); sided.purchase(gunRunOffer,at:1700)
+        check(sided.planes[0].heading == -1 && sided.planes[0].x >= World.width+World.edgeMargin && sided.jets[0].heading == -1,"a chosen side overrides the nearer edge")
+        sided.supportSide = 1; sided.purchase(crate,at:World.width-200)
+        check(sided.planes[1].heading == 1 && sided.planes[1].x <= -World.edgeMargin,"support can be flown in from the far edge")
+        sided.reset(); check(sided.supportSide == nil,"reset clears the chosen side")
         let quick=World(); quick.purchase(crate,at:600)
         check(quick.refusal(crate) == nil && quick.purchase(crate,at:700) && quick.planes.count == 2,"a second crate can be called immediately")
         dry.purchase(crate,at:400)
@@ -349,12 +386,12 @@ import Foundation
             for _ in 0..<600 where !strafe.jets.isEmpty {
                 strafe.update(1.0/60)
                 if let jet = strafe.jets.first {
-                    let y = World.strafePath(jet.dx,low:jet.low).y
+                    let y = jet.path.y
                     lowest = max(lowest,y)
                     if y+20 >= strafe.ground(at:jet.x) { clipped = true }
                 }
             }
-            check(lowest > World.jetAltitude+30 && lowest < strip-40,"the jet dives but pulls out well above the strip (\(Int(target)): lowest \(Int(lowest)), ground \(Int(strip)))")
+            check(lowest > strafe.jetCruise+30 && lowest < strip-40,"the jet dives but pulls out well above the strip (\(Int(target)): lowest \(Int(lowest)), ground \(Int(strip)))")
             check(!clipped,"the jet never flies through a structure on its pass (\(Int(target)))")
             for _ in 0..<120 { strafe.update(1.0/60) }
             check(strafe.jets.isEmpty && strafe.rounds == World.gunRounds,"the jet fires its whole burst and leaves (\(Int(target)))")
@@ -363,7 +400,7 @@ import Foundation
             // Targets on the east half are strafed by a jet coming in from the east, flying west.
             let east = target > World.width/2
             let ahead = east ? target-impacts.min()! : impacts.max()!-target, behind = east ? impacts.max()!-target : target-impacts.min()!
-            check(strafe.destroyed > 0 && ahead <= World.strafeLength/2+20 && behind <= -World.fireWindow.lowerBound,"no round overshoots the strip or lands behind the jet (\(Int(target)))")
+            check(strafe.destroyed > 0 && ahead <= World.strafeLength/2+20 && behind <= -World.fireWindow.lowerBound,"no round overshoots the strip or lands behind the jet (\(Int(target)): ahead \(Int(ahead)), behind \(Int(behind)))")
             if target != 1700 {
                 // In the town and the fortress, walls between the jet and the strip take part of the burst.
                 check(hits.count >= World.gunRounds/3,"a third or more of the burst still reaches the strip past cover (\(Int(target)))")
@@ -372,14 +409,28 @@ import Foundation
                 check(impacts.min()! < target && impacts.max()! > target && impacts.max()!-impacts.min()! > World.strafeLength/2,"the burst is walked across the strip (\(Int(target)): \(Int(impacts.min()!))-\(Int(impacts.max()!)))")
             }
         }
-        // A gun run locks itself for 45 s; crates stay free throughout.
+        // A gun run locks itself for 30 s; crates stay free throughout.
         let repeatRun=World(); repeatRun.credits = 5_000; repeatRun.purchase(gunRun,at:2000)
         for _ in 0..<Int(World.gunRunCooldown*60)-30 { repeatRun.update(1.0/60) }
-        check(repeatRun.refusal(World.support[0]) == nil && repeatRun.refusal(gunRun) != nil,"a gun run stays locked for its 45 seconds")
+        check(repeatRun.refusal(World.support[0]) == nil && repeatRun.refusal(gunRun) != nil,"a gun run stays locked for its 30 seconds")
         for _ in 0..<60 { repeatRun.update(1.0/60) }
-        check(World.gunRunCooldown == 45 && repeatRun.refusal(gunRun) == nil,"a gun run is available again after 45 seconds")
+        check(World.gunRunCooldown == 30 && repeatRun.refusal(gunRun) == nil,"a gun run is available again after 30 seconds")
         let cleared=World(); cleared.purchase(gunRun,at:2000)
         cleared.reset(); check(cleared.jets.isEmpty,"reset clears strafing jets")
+        // Dev mode: infinite credits buy anything without spending and bank nothing.
+        let dev=World(); dev.reset(); dev.credits=0; dev.devMode=true
+        check(dev.refusal(cost:1_000_000) == nil,"dev mode never refuses on cost")
+        check(dev.purchase(World.offers[0],at:World.deployZone.lowerBound+20) && dev.credits == 0,"dev mode purchases cost nothing")
+        check(dev.purchase(World.support[0],at:1000) && dev.credits == 0,"dev mode support costs nothing")
+        check(dev.purchase(World.support[1],at:3000) && dev.purchase(World.support[1],at:3000),"dev mode gun runs have no cooldown")
+        check(dev.purchase(World.support[2],at:3000) && dev.purchase(World.support[2],at:3000),"dev mode firebombs have no cooldown")
+        dev.spawn(1,kind:.rpg,at:300); for i in dev.soldiers.indices { dev.soldiers[i].selected = dev.soldiers[i].kind == .rpg }
+        for i in dev.soldiers.indices { dev.soldiers[i].cooldown = 0 }
+        check(dev.fireRockets(at:Vec(x:900,y:400)) == 1 && dev.fireRockets(at:Vec(x:900,y:400)) == 1,"dev mode RPGs fire without reloading")
+        dev.score=World.requirement; let bankBefore=dev.bank; dev.extract()
+        check(dev.bank == bankBefore,"dev mode banks nothing on extraction")
+        dev.bank=5000; check(dev.withdraw(5000) == 0 && dev.bank == 5000,"dev mode never withdraws from the bank")
+        dev.score=150_000; dev.reset(); check(dev.carriedCredits == 0,"dev mode points never carry into the next round")
         // Firebombs: a 2,000-credit C-130 run whose napalm sets the town burning for minutes.
         let firebomb=World.support[2]
         check(firebomb.kind == .firebomb && firebomb.cost == 2000,"a firebomb run costs 2,000 credits")
@@ -402,7 +453,27 @@ import Foundation
         for _ in 0..<45*60 { town.update(1.0/60) }
         print("Firebombs at \(Int(townX)): \(early) blocks after 15 s, \(town.destroyed) after 60 s, \(town.score) pts")
         check(town.destroyed > early+60 && town.score > earlyScore,"fire keeps damaging infrastructure long after the bombs land")
-        check(town.chunks.count < 3,"fire damage is gradual, not an instant collapse")
+        // Spalling concrete keeps loosening a little rubble off its bars, but nothing large comes down at once.
+        check(town.chunks.map{ $0.cells.count }.reduce(0,+) < Int(World.toppleMass),"fire damage is gradual, not an instant collapse")
+        // Balance: a one-off air strike must pay back its credits better than an RPG gunner,
+        // who can be rearmed by cheap crates. Measured on the outpost bunker.
+        func pointsPerCredit(_ cost: Int, seconds: Double, _ setup: (World) -> Void, step: (World) -> Void = { _ in }) -> Double {
+            let w=World(); w.credits = 10_000; setup(w)
+            for _ in 0..<Int(seconds*60) { step(w); w.update(1.0/60) }
+            return Double(w.score)/Double(cost)
+        }
+        let bunkerX=1040.0
+        var volley=0
+        let rpgRate=pointsPerCredit(1200,seconds:90,{ w in
+            w.spawn(1,kind:.rpg); w.soldiers[0].position=Vec(x:bunkerX-260,y:w.troopGround(at:bunkerX-260))
+        },step:{ w in
+            let x=bunkerX+Double(volley%3-1)*30
+            if w.soldiers[0].cooldown <= 0 && w.fireRockets(at:Vec(x:x,y:w.ground(at:x)+10)) > 0 { volley+=1 }
+        })
+        let strafe=pointsPerCredit(gunRun.cost,seconds:90,{ $0.purchase(gunRun,at:bunkerX) })
+        let napalm=pointsPerCredit(firebomb.cost,seconds:150,{ $0.purchase(firebomb,at:bunkerX) })
+        print(String(format:"Points per credit on the bunker: RPG %.1f, gun run %.1f, firebombs %.1f",rpgRate,strafe,napalm))
+        check(strafe > rpgRate*1.5 && napalm > rpgRate*1.3,"air strikes pay back more points per credit than an RPG gunner")
         var burnt=60
         while !town.fire.burning.isEmpty && burnt < 600 { for _ in 0..<60 { town.update(1.0/60) }; burnt += 1 }
         check(town.fire.burning.isEmpty,"the fires die out on their own (out after \(burnt) s)")
@@ -423,9 +494,9 @@ import Foundation
         check(slab.voxels[block] == 3,"a brief flame doesn't destroy concrete")
         let lockout=World(); lockout.credits = 5_000; lockout.purchase(firebomb,at:townX)
         for _ in 0..<Int(World.firebombCooldown*60)-30 { lockout.update(1.0/60) }
-        check(lockout.refusal(firebomb) != nil,"firebombs stay locked for their 120 seconds")
+        check(lockout.refusal(firebomb) != nil,"firebombs stay locked for their 90 seconds")
         for _ in 0..<60 { lockout.update(1.0/60) }
-        check(World.firebombCooldown == 120 && lockout.refusal(firebomb) == nil,"firebombs are available again after 120 seconds")
+        check(World.firebombCooldown == 90 && lockout.refusal(firebomb) == nil,"firebombs are available again after 90 seconds")
         // RPG gunner: 1,200 credits, 7 rockets, a 7 s reload, fired by hand at the pointer.
         let rpg=World.offers[3]
         check(rpg.kind == .rpg && rpg.cost == 1200 && rpg.count == 1,"an RPG gunner costs 1,200 credits")
@@ -478,6 +549,73 @@ import Foundation
         let finalScore = shop.score
         shop.reset()
         check(shop.spent == 0 && shop.points == 0 && shop.credits == World.startingCredits+World.credits(for:finalScore) && shop.soldiers.isEmpty,"reset opens a new round with fresh credits")
+        // Reinforced concrete: bars cast through slabs and columns, bared by blasts and fire.
+        let cast=World()
+        let slabRow=(58-2-9)*S+1
+        check(cast.rebar[cast.index(340*S,slabRow)] == World.barH && cast.rebar.contains(World.barV),"slabs carry horizontal bars and walls and columns vertical ones")
+        check(cast.rebar[cast.index(270*S,World.bridgeDeck*S+1)] == 0 && cast.rebar[cast.index(428*S,30*S)] == 0,"bridge concrete and brick are unreinforced")
+        cast.explode(at:Vec(x:340*World.cell*Double(S),y:Double(slabRow)*World.cell+World.top-2),radius:29)
+        let bared=cast.voxels.indices.filter{ World.isBar(cast.voxels[$0]) }
+        check(!bared.isEmpty && bared.allSatisfy{ cast.rebar[$0] == cast.voxels[$0] },"blasting reinforced concrete leaves its bars standing")
+        check(!World.isStructure(World.barH) && World.points(World.barH) < World.points(3),"bare bars are not structure and score like rubble")
+        func blasted(_ reinforcement: Double) -> Int {
+            let w=World(); w.reinforcement=reinforcement
+            let before=w.voxels.filter{ $0 == 3 }.count
+            w.explode(at:Vec(x:356*World.cell*Double(S),y:Double(43*S)*World.cell+World.top),radius:29)
+            return before-w.voxels.filter{ $0 == 3 }.count
+        }
+        check(blasted(3) < blasted(1) && blasted(1) < blasted(0),"better reinforced levels lose less concrete to each blast")
+        // A slab holed through to its bars keeps hanging on them; cut the bars and it drops.
+        func holed(bars: Bool) -> World {
+            let w=World(); w.unit=S
+            w.voxels = [UInt8](repeating:0,count:World.columns*World.rows)
+            w.fill(0,80,World.columns/S,World.rows/S-80,2)
+            w.fill(46,52,2,28,3); w.fill(90,52,2,28,3); w.fill(46,50,46,2,3)
+            w.layRebar()
+            w.fill(60,50,4,2,0)
+            w.unit=1
+            if bars { for y in [50*S+1,50*S+2] { for x in 60*S..<64*S { w.voxels[w.index(x,y)]=World.barH } } }
+            w.unit=S
+            w.solveStructure()
+            return w
+        }
+        check(holed(bars:true).material(66*S,50*S) == 3,"bars bridging a hole keep the slab beyond it up")
+        check(holed(bars:false).material(66*S,50*S) == 0,"without its bars the far side of the hole falls")
+        // A lone five-storey block whose west ground-floor bays are blasted out leans over
+        // slowly about its east wall, snaps at a weak storey, and comes down on its side.
+        let lean=World(); lean.unit=S
+        lean.voxels = [UInt8](repeating:0,count:World.columns*World.rows)
+        lean.fill(0,80,World.columns/S,World.rows/S-80,1)
+        lean.building(100,20,5,80)
+        lean.layRebar()
+        lean.solveStructure()
+        check(lean.chunks.isEmpty,"an intact reinforced block stands")
+        // A wider block keeps standing on its interior column when one outer wall goes.
+        let bay=World(); bay.unit=S
+        bay.voxels = [UInt8](repeating:0,count:World.columns*World.rows)
+        bay.fill(0,80,World.columns/S,World.rows/S-80,1)
+        bay.building(100,34,3,80); bay.layRebar()
+        bay.fill(100,80-9,9,7,0); bay.structureDirty=true
+        for _ in 0..<60 { bay.update(1.0/60) }
+        // Only the bare trim on the blasted face drops away.
+        check(bay.chunks.allSatisfy{ $0.cells.count < 8*S*S } && bay.material(110*S,80*S-10*S) == 3,"losing one outer wall leaves a reinforced block standing on its column")
+        bay.fill(100,80-9,18,7,0); bay.structureDirty=true
+        for _ in 0..<30 { bay.update(1.0/60) }
+        check(bay.chunks.contains{ $0.rooted },"losing its column too tips the block over")
+        lean.fill(100,80-9,14,7,0); lean.structureDirty=true
+        for _ in 0..<30 { lean.update(1.0/60) }
+        check(lean.chunks.count == 1 && lean.chunks[0].rooted && lean.chunks[0].angle < 0 && lean.chunks[0].angle > -0.12,"an undercut block creaks over slowly toward the missing bays")
+        var snappedApart=false, steepest=0.0
+        for _ in 0..<240 {
+            lean.update(1.0/60)
+            if lean.chunks.filter({ $0.cells.count >= Int(World.toppleMass) }).count >= 2 { snappedApart=true }
+            if let big=lean.chunks.filter({ $0.cells.count >= Int(World.toppleMass) && $0.hinge == nil }).map({ -$0.angle }).max() { steepest=max(steepest,big) }
+        }
+        check(snappedApart,"a leaning block snaps into separate sections")
+        check(steepest > 1.2,"the section that breaks away comes down on its side (\(String(format:"%.2f",steepest)) rad)")
+        for _ in 0..<600 { lean.update(1.0/60) }
+        let wreck=(0..<World.columns).filter{ x in (0..<World.rows).contains{ lean.voxels[lean.index(x,$0)] == 10 } }
+        check(lean.chunks.isEmpty && (wreck.min() ?? Int.max) < 85*S,"the wreck settles across the ground on the side it fell to")
         print("All structural physics checks passed. Peak scenario ended with \(stress.chunks.count) moving chunks.")
     }
 }

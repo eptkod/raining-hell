@@ -24,6 +24,8 @@ struct SupplyCrate {
 /// A cargo plane crossing the whole sky from the map edge nearer `dropX` to drop a crate there.
 struct SupplyPlane {
     var x: Double
+    /// Current height; it follows `World.transportAltitude` as the skyline changes.
+    var y: Double
     let dropX: Double
     /// +1 flying east (in from the west edge), -1 flying west (in from the east edge).
     var heading = 1.0
@@ -38,6 +40,8 @@ struct StrafeJet {
     let targetX: Double
     /// Lowest point of the dive, chosen at call-in to clear the skyline under the pass.
     let low: Double
+    /// Cruising height before and after the dive, set at call-in from the skyline.
+    let cruise: Double
     /// +1 flying east (in from the west edge), -1 flying west (in from the east edge).
     var heading = 1.0
     var fired = 0
@@ -45,12 +49,14 @@ struct StrafeJet {
     var flash = 0.0
     /// Distance travelled past the target along the jet's heading.
     var dx: Double { (x-targetX)*heading }
+    /// Height and pitch at the jet's current point on its pass.
+    var path: (y: Double, pitch: Double) { World.strafePath(dx,low:low,cruise:cruise) }
 }
 
 extension World {
     static let support = [SupportOffer(name:"SUPPLY CRATE",detail:"AIRDROP · AMMO FOR 10 RIFLEMEN · LASTS 45 S",kind:.supplyCrate,cost:150),
                           SupportOffer(name:"GUN RUN",detail:"STRAFING PASS · 30MM BURST WALKED ACROSS 480 PX",kind:.gunRun,cost:1000),
-                          SupportOffer(name:"FIREBOMBS",detail:"C-130 · 6 NAPALM CANISTERS · LONG-BURNING FIRES",kind:.firebomb,cost:2000)]
+                          SupportOffer(name:"FIREBOMBS",detail:"C-130 · 8 NAPALM CANISTERS · LONG-BURNING FIRES",kind:.firebomb,cost:2000)]
     /// Reach of a landed crate, in world px from its centre.
     static let crateRadius = 120.0
     /// Seconds a landed crate keeps rearming troops.
@@ -59,9 +65,28 @@ extension World {
     static let crateLoads = 10
     static var crateStock: Int { crateLoads*TroopKind.rifleman.magazine }
     static let crateFallSpeed = 170.0
-    /// Transports fly in the open sky just above the top of the map, so even the tallest
-    /// tower passes beneath their landing gear and lowered ramp.
-    static let planeAltitude = World.top-60
+    /// Height of the transports' centre line above the tallest standing block. Their landing
+    /// gear and lowered ramp hang 24 px below it, so this leaves a wide gap over every roof.
+    static let flightClearance = 455.0
+    /// Open sky the camera may rise into above the map.
+    static let skyHeight = 620.0
+    /// Highest the aircraft fly, so the transport's tail fin stays where the camera can reach.
+    static let flightCeiling = World.top-skyHeight+60
+    /// The strafing jet cruises this far above the transports.
+    static let jetStack = 90.0
+    /// Climb or descent rate (px/s) of a transport following a changing skyline.
+    static let climbRate = 45.0
+    /// Seconds between skyline measurements.
+    static let skylineInterval = 0.5
+    /// Cruising height for transports: well clear of the tallest block still standing, so
+    /// they fly lower once a tower comes down.
+    var transportAltitude: Double { max(Self.flightCeiling,skyline-Self.flightClearance) }
+    /// Cruising height for a strafing jet called in now.
+    var jetCruise: Double { max(Self.flightCeiling-30,transportAltitude-Self.jetStack) }
+    /// Measures the top of the tallest block on the map.
+    func refreshSkyline() {
+        skyline = stride(from:0.0,to:Self.width,by:Self.cell).map{ ground(at:$0) }.min() ?? Self.top
+    }
     /// The crate leaves through the rear cargo ramp, this far behind the plane's centre.
     static let rampOffset = 66.0
     static let planeSpeed = 520.0
@@ -72,6 +97,9 @@ extension World {
     static let edgeMargin = 220.0
     /// Aircraft come in from whichever map edge is nearer the point they are called on.
     static func heading(toward x: Double) -> Double { x < width/2 ? 1 : -1 }
+    /// Heading of support called on `x`: the player's chosen side (`supportSide`) if set,
+    /// otherwise in from the nearer edge.
+    func approach(toward x: Double) -> Double { supportSide ?? Self.heading(toward:x) }
     /// Where an aircraft heading `heading` enters: off the near map edge, or further out if
     /// it needs at least `lead` px of run-up before reaching `x`.
     static func entry(_ heading: Double, toward x: Double, lead: Double) -> Double {
@@ -88,13 +116,13 @@ extension World {
     /// The plane releases this far short of the drop point so the drifting crate lands on it.
     static var releaseLead: Double { planeSpeed/crateDrag }
     static let jetSpeed = 900.0
-    /// Cruising height of the strafing jet before and after its dive, above the transports.
-    static let jetAltitude = World.top-150
     /// Width of ground the burst is walked across, centred on the called-in point.
     static let strafeLength = 480.0
-    static let gunRounds = 80
+    static let gunRounds = 120
     static let gunMuzzleSpeed = 1500.0
-    static let gunBlastRadius = 8.0
+    static let gunBlastRadius = 12.0
+    /// Rounds self-destruct this far past the far end of the strip.
+    static let gunFuseReach = 12.0
     /// The gun fires while the jet is this far (relative to the target) along its pass.
     static let fireWindow = -700.0 ... -200.0
     /// Along its pass, the jet is at least this far short of the target when it appears,
@@ -104,8 +132,8 @@ extension World {
     /// Gun muzzle position relative to the jet's centre, before pitch is applied.
     static let gunMuzzle = Vec(x:56,y:2)
     /// Height and pitch (radians, positive nose-down) of a strafing jet `dx` px past its target.
-    static func strafePath(_ dx: Double, low: Double) -> (y: Double, pitch: Double) {
-        let drop = low-jetAltitude
+    static func strafePath(_ dx: Double, low: Double, cruise: Double) -> (y: Double, pitch: Double) {
+        let jetAltitude = cruise, drop = low-jetAltitude
         if dx <= diveStart { return (jetAltitude,0) }
         if dx <= diveEnd {
             // A straight dive, eased in over its first 200 px.
@@ -127,20 +155,20 @@ extension World {
     }
     /// Where a strafing jet's cannon is, given its position along the pass.
     static func gunPosition(_ jet: StrafeJet) -> Vec {
-        let (y,pitch) = strafePath(jet.dx,low:jet.low), m = gunMuzzle
+        let (y,pitch) = jet.path, m = gunMuzzle
         return Vec(x:jet.x+jet.heading*(m.x*cos(pitch)-m.y*sin(pitch)),y:y+m.x*sin(pitch)+m.y*cos(pitch))
     }
     /// The lowest the jet may dive over `x`: well clear of every block under the low part of
     /// its pass, and raised further if the dive or climb-out would clip a tower on the way.
     func strafeFloor(_ x: Double) -> Double {
         var top = Self.bottom
-        let h = Self.heading(toward:x), a = x+h*(Self.diveEnd-150), b = x+h*(Self.strafeLength/2+30)
+        let h = approach(toward:x), a = x+h*(Self.diveEnd-150), b = x+h*(Self.strafeLength/2+30)
         for px in stride(from:min(a,b),through:max(a,b),by:Self.cell) { top = min(top,ground(at:px)) }
-        let ceiling = Self.jetAltitude+40
+        let cruise = jetCruise, ceiling = cruise+40
         var low = max(ceiling,min(top-110,ground(at:x)-230))
         func clips(_ low: Double) -> Bool {
             stride(from:Self.diveStart,through:Self.climbEnd,by:Self.cell).contains { dx in
-                Self.strafePath(dx,low:low).y+Self.jetClearance > ground(at:x+h*dx)
+                Self.strafePath(dx,low:low,cruise:cruise).y+Self.jetClearance > ground(at:x+h*dx)
             }
         }
         while low > ceiling && clips(low) { low = max(ceiling,low-Self.cell) }
@@ -149,10 +177,11 @@ extension World {
     /// Gap kept between the jet's centre line and any block beneath its dive and climb-out.
     static let jetClearance = 40.0
     /// Seconds before another gun run can be called, counted from the call-in.
-    static let gunRunCooldown = 45.0
+    static let gunRunCooldown = 30.0
 
     /// Seconds left before an offer can be called again; supply crates have no cooldown.
     func cooldown(_ kind: SupportKind) -> Double {
+        if devMode { return 0 }
         switch kind {
         case .supplyCrate: return 0
         case .gunRun: return gunRunCooldown
@@ -175,28 +204,29 @@ extension World {
             onSound?(SoundEvent(cue:.cease))
             return false
         }
-        credits -= offer.cost; spent += offer.cost
+        if !devMode { credits -= offer.cost }; spent += offer.cost
+        refreshSkyline()
         switch offer.kind {
         case .supplyCrate:
-            let h = Self.heading(toward:x)
-            let plane = SupplyPlane(x:Self.entry(h,toward:x,lead:Self.planeRun),dropX:x,heading:h)
+            let h = approach(toward:x)
+            let plane = SupplyPlane(x:Self.entry(h,toward:x,lead:Self.planeRun),y:transportAltitude,dropX:x,heading:h)
             planes.append(plane)
             onSound?(SoundEvent(cue:.plane,x:Self.onMap(plane.x)))
             status = "SUPPLY PLANE INBOUND · -\(offer.cost) CR · MOVE TROOPS INTO THE DROP RING TO REARM"
         case .gunRun:
             gunRunCooldown = Self.gunRunCooldown
-            let h = Self.heading(toward:x)
-            let jet = StrafeJet(x:Self.entry(h,toward:x,lead:-Self.jetEntry),targetX:x,low:strafeFloor(x),heading:h)
+            let h = approach(toward:x)
+            let jet = StrafeJet(x:Self.entry(h,toward:x,lead:-Self.jetEntry),targetX:x,low:strafeFloor(x),cruise:jetCruise,heading:h)
             jets.append(jet)
             onSound?(SoundEvent(cue:.jet,x:Self.onMap(jet.x)))
             status = "GUN RUN INBOUND · -\(offer.cost) CR · STRAFING THE MARKED STRIP"
         case .firebomb:
             firebombCooldown = Self.firebombCooldown
-            let h = Self.heading(toward:x)
+            let h = approach(toward:x)
             let aims = h > 0 ? Self.firebombAims(x) : Self.firebombAims(x).reversed()
             // From the near map edge, so the plane is heard and seen well before the first release.
-            let release = aims[0]-h*(bombLead(aims[0])-Self.rampOffset)
-            let bomber = FireBomber(x:Self.entry(h,toward:release,lead:Self.planeRun),aims:aims,heading:h)
+            let alt = transportAltitude, release = aims[0]-h*(bombLead(aims[0],from:alt)-Self.rampOffset)
+            let bomber = FireBomber(x:Self.entry(h,toward:release,lead:Self.planeRun),y:alt,aims:aims,heading:h)
             bombers.append(bomber); bombed = false
             onSound?(SoundEvent(cue:.plane,x:Self.onMap(bomber.x)))
             status = "FIREBOMB RUN INBOUND · -\(offer.cost) CR · C-130 APPROACHING FROM THE \(h > 0 ? "WEST" : "EAST")"
@@ -208,14 +238,17 @@ extension World {
     func updateSupport(_ dt: Double) {
         gunRunCooldown = max(0,gunRunCooldown-dt)
         firebombCooldown = max(0,firebombCooldown-dt)
+        skylineClock -= dt
+        if skylineClock <= 0 { skylineClock = Self.skylineInterval; refreshSkyline() }
         updateJets(dt)
         for p in planes.indices {
             let h = planes[p].heading
             planes[p].x += h*Self.planeSpeed*dt
+            planes[p].y = towardCruise(planes[p].y,dt)
             let ramp = planes[p].x-h*Self.rampOffset
             if !planes[p].dropped && (ramp-planes[p].dropX)*h >= -Self.releaseLead {
                 planes[p].dropped = true
-                crates.append(SupplyCrate(position:Vec(x:ramp,y:Self.planeAltitude+16),drift:h*Self.planeSpeed))
+                crates.append(SupplyCrate(position:Vec(x:ramp,y:planes[p].y+16),drift:h*Self.planeSpeed))
                 status = "SUPPLY CRATE AWAY · PARACHUTE DEPLOYED"
             }
         }
@@ -256,6 +289,10 @@ extension World {
         }
         crates.removeAll { $0.life <= 0 || $0.stock <= 0 }
     }
+    /// A transport's height `y` eased toward the current cruising height.
+    func towardCruise(_ y: Double,_ dt: Double) -> Double {
+        y+max(-Self.climbRate*dt,min(Self.climbRate*dt,transportAltitude-y))
+    }
     /// Flies each strafing jet along its pass and fires the rounds due so far. Rounds are
     /// aimed at points walked evenly through the strip and fly as ordinary shots, so a
     /// building in the line of fire takes the hits meant for the ground behind it.
@@ -286,7 +323,8 @@ extension World {
                     let t = max(0,(edge-gun.x)/v.x)
                     start = Vec(x:edge,y:gun.y+v.y*t+Self.gravity*t*t/2); v.y += Self.gravity*t
                 }
-                shots.append(Shot(position:start,previous:start,velocity:v,radius:Self.gunBlastRadius))
+                let fuse = jets[j].targetX+h*(Self.strafeLength/2+Self.gunFuseReach)
+                shots.append(Shot(position:start,previous:start,velocity:v,radius:Self.gunBlastRadius,fuse:fuse))
                 particles.append(Particle(position:gun,velocity:Vec(x:h*Self.jetSpeed*0.3+(random-0.5)*40,y:(random-0.5)*30),life:1+random,total:2,kind:9,size:6+random*6))
                 jets[j].fired += 1; jets[j].flash = 0.06; rounds += 1
             }

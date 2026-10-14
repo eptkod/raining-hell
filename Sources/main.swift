@@ -32,7 +32,7 @@ if CommandLine.arguments.contains("--self-test") {
     for _ in 0..<60 { w.update(1/60) }
     check(w.soldiers[0].position.x > x,"move command advances soldiers")
     for _ in 0..<12 { w.spawn(4) }
-    check(w.soldiers.count == 32,"unit cap enforced")
+    check(w.soldiers.count == 52,"no unit cap")
     w.explode(at:Vec(x:0,y:World.top)); w.explode(at:Vec(x:World.width,y:World.bottom))
     check(true,"edge explosions remain in bounds")
     w.speed = 2; w.reset()
@@ -102,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             view.inMenu = false; view.help = false
             view.world.purchase(World.support[0],at:900)
             while (view.world.planes.first?.x ?? 1e9) < 600 { view.world.update(1.0/60) }
-            view.camera = Vec(x:590,y:World.planeAltitude+10); view.zoom = 3; view.clampCamera()
+            view.camera = Vec(x:590,y:(view.world.planes.first?.y ?? view.world.transportAltitude)+10); view.zoom = 3; view.clampCamera()
         }
         if CommandLine.arguments.contains("--strafe-preview") {
             view.inMenu = false; view.help = false
@@ -110,7 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             while (view.world.jets.first?.fired ?? 0) < World.gunRounds/2 { view.world.update(1.0/60) }
             for _ in 0..<4 { view.world.update(1.0/60) }
             let zoom = CommandLine.arguments.contains("--close") ? 3.0 : 1.1
-            let jet = view.world.jets[0], y = World.strafePath(jet.dx,low:jet.low).y
+            let jet = view.world.jets[0], y = jet.path.y
             view.camera = zoom > 2 ? Vec(x:jet.x,y:y) : Vec(x:1450,y:440); view.zoom = zoom; view.clampCamera()
         }
         // --firebomb-preview [seconds] calls a firebomb run on the town and lets it burn.
@@ -166,6 +166,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--esc") { view.inMenu = false; view.openEscMenu() }
         if CommandLine.arguments.contains("--esc-settings") { view.inMenu = false; view.openEscMenu(); view.escPage = .settings }
         if CommandLine.arguments.contains("--esc-exit") { view.inMenu = false; view.openEscMenu(); view.escPage = .exit }
+        // --lobby-settings [danger [save|settings]] opens the lobby settings on a tab, or a danger confirmation.
+        if let index = CommandLine.arguments.firstIndex(of:"--lobby-settings") {
+            let rest = CommandLine.arguments.dropFirst(index+1)
+            view.lobbySettings = true
+            if rest.first == "danger" { view.settingsTab = .danger }
+            if rest.dropFirst().first == "save" { view.confirming = .deleteSave; view.confirmEntry = "DEL" }
+            if rest.dropFirst().first == "settings" { view.confirming = .resetSettings; view.confirmEntry = "RESET" }
+        }
+        // --cheat text opens the lobby cheat box and types into it, for screenshots.
+        if let index = CommandLine.arguments.firstIndex(of:"--cheat"), CommandLine.arguments.count > index+1 {
+            view.cheatOpen = true; view.cheatType(CommandLine.arguments[index+1])
+        }
         if let index = CommandLine.arguments.firstIndex(of:"--screenshot"), CommandLine.arguments.count > index+1 {
             let path = CommandLine.arguments[index+1]
             if CommandLine.arguments.contains("--preview") {
