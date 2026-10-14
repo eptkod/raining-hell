@@ -23,6 +23,8 @@ struct Ember { var position: Vec; var velocity: Vec; var life: Double }
 /// each lands on its point.
 struct FireBomber {
     var x: Double
+    /// Current height; it follows `World.transportAltitude` as the skyline changes.
+    var y: Double
     /// Ground points the stick is laid across, in the order the plane passes over them.
     let aims: [Double]
     /// +1 flying east (in from the west edge), -1 flying west (in from the east edge).
@@ -68,20 +70,20 @@ struct FireField {
 }
 
 extension World {
-    static let firebombCount = 6
-    /// Gap between the canisters' aim points; the stick covers about 380 px.
+    static let firebombCount = 8
+    /// Gap between the canisters' aim points; the stick covers about 450 px.
     static let firebombSpacing = 64.0
     /// Seconds before another firebomb run can be called, counted from the call-in.
-    static let firebombCooldown = 120.0
+    static let firebombCooldown = 90.0
     /// Canisters leave the ramp at the plane's speed with a slight downward push.
     static func firebombRelease(_ heading: Double) -> Vec { Vec(x:heading*planeSpeed,y:30) }
-    static let gelDropsPerBomb = 34
+    static let gelDropsPerBomb = 44
     /// Blocks of building a canister can punch through before it bursts.
     static let firebombPierce = 10
     /// Gel in each splashed gobbet and in the pool around the impact, in seconds of burning.
-    static let gelPerDrop: Float = 30, gelPool: Float = 42
+    static let gelPerDrop: Float = 45, gelPool: Float = 60
     /// Most gel one cell holds; gel running into a full cell spreads too thin to matter.
-    static let gelLimit: Float = 60
+    static let gelLimit: Float = 90
     /// Pool half-width in cells either side of the impact.
     static let gelPoolReach = 7
     /// Seconds between fire simulation steps.
@@ -94,7 +96,7 @@ extension World {
     static let heatSpread: [(dx: Int, dy: Int, w: Float)] = [(0,-1,1.0),(-1,-1,0.45),(1,-1,0.45),(-1,0,0.4),(1,0,0.4),
                                                              (-1,1,0.12),(1,1,0.12),(0,1,0.1),(0,-2,0.5)]
     /// Extra heat per second that burning gel puts into each block it touches.
-    static let gelContact: Float = 0.9
+    static let gelContact: Float = 4
     /// Share of held heat that leaks away per second.
     static let heatLoss: Float = 0.3
 
@@ -102,9 +104,10 @@ extension World {
     static func firebombAims(_ x: Double) -> [Double] {
         (0..<firebombCount).map { min(width-4,max(4,x+(Double($0)-Double(firebombCount-1)/2)*firebombSpacing)) }
     }
-    /// How far short of `aim` a canister must leave the ramp to land on it.
-    func bombLead(_ aim: Double) -> Double {
-        let drop = max(20,ground(at:aim)-Self.planeAltitude-14), v = Self.firebombRelease(1).y, g = Self.gravity
+    /// How far short of `aim` a canister released from a plane at height `altitude` must
+    /// leave the ramp to land on it.
+    func bombLead(_ aim: Double, from altitude: Double) -> Double {
+        let drop = max(20,ground(at:aim)-altitude-14), v = Self.firebombRelease(1).y, g = Self.gravity
         return Self.planeSpeed*(-v+(v*v+2*g*drop).squareRoot())/g
     }
 
@@ -136,11 +139,11 @@ extension World {
     static func heatToughness(_ m: UInt8) -> Float? {
         switch m {
         case 4: return 1.2     // glass shatters
-        case 11: return 30     // steel loses its strength
-        case 10: return 25     // loose rubble crumbles
-        case 5: return 45      // brick
-        case 3: return 55      // concrete spalls
-        case 12: return 90     // bridge concrete
+        case 11, 13, 14: return 18  // steel and rebar lose their strength
+        case 10: return 15     // loose rubble crumbles
+        case 5: return 27      // brick
+        case 3: return 33      // concrete spalls
+        case 12: return 54     // bridge concrete
         default: return nil
         }
     }
@@ -185,7 +188,9 @@ extension World {
         guard m != 0 else { return }
         let p = Vec(x:(Double(i%Self.columns)+0.5)*Self.cell,y:(Double(i/Self.columns)+0.5)*Self.cell+Self.top)
         award(claim(i),at:p)
-        voxels[i] = 0; destroyed += 1; structureDirty = true
+        // Spalled concrete bares its reinforcing bars.
+        voxels[i] = m == 3 ? rebar[i] : 0; destroyed += 1; structureDirty = true
+        if voxels[i] != 0 { worth[i] = Self.points(voxels[i]) }
         if m == 3 { reanchor(i) }
         fire.scorch[i] = 0; fire.char[i] = 0; fire.fuel[i] = -1; fire.heat[i] = 0
         if m == 4 { fireShattered = true }
@@ -225,11 +230,12 @@ extension World {
         for b in bombers.indices {
             let h = bombers[b].heading
             bombers[b].x += h*Self.planeSpeed*dt
+            bombers[b].y = towardCruise(bombers[b].y,dt)
             let ramp = bombers[b].x-h*Self.rampOffset
             while !bombers[b].done {
                 let aim = bombers[b].aims[bombers[b].released]
-                guard (ramp-aim)*h >= -bombLead(aim) else { break }
-                let p = Vec(x:ramp,y:Self.planeAltitude+14)
+                guard (ramp-aim)*h >= -bombLead(aim,from:bombers[b].y) else { break }
+                let p = Vec(x:ramp,y:bombers[b].y+14)
                 fireBombs.append(FireBomb(position:p,previous:p,velocity:Self.firebombRelease(h)))
                 bombers[b].released += 1
                 if bombers[b].released == 1 { status = "FIREBOMBS AWAY · CLEAR THE TARGET AREA" }
@@ -245,7 +251,13 @@ extension World {
                 let sub = dt/Double(steps)
                 bomb.velocity.y += Self.gravity*sub
                 bomb.position = bomb.position+bomb.velocity*sub
-                if bomb.position.x < 0 || bomb.position.x > Self.width || bomb.position.y >= Self.bottom { hit = true; break }
+                if bomb.position.y >= Self.bottom { hit = true; break }
+                // A stick laid near the map edge is released while the plane is still beyond
+                // it; those canisters fly on into the map. Only one leaving the map is lost.
+                if bomb.position.x < 0 || bomb.position.x > Self.width {
+                    if (bomb.position.x < 0) == (bomb.velocity.x < 0) { hit = true; break }
+                    open = bomb.position; continue
+                }
                 let m = material(at:bomb.position)
                 if m == 0 {
                     // Gaps between trim and roof don't count; breaking into a room does.
@@ -267,7 +279,7 @@ extension World {
     /// A canister bursts: a small charge breaks it open, a fireball rolls up, a pool of gel
     /// spreads over the surface it hit, and burning gobbets splash forward and up.
     func burst(_ bomb: FireBomb, at p: Vec, open: Vec) {
-        explode(at:p,radius:9)
+        explode(at:p,radius:14)
         blasts.append(Blast(position:open,radius:46))
         quake(at:p,2.2,cap:6,margin:60)
         if !bombed { bombed = true; status = "FIREBOMBS ON TARGET · TARGET AREA BURNING" }

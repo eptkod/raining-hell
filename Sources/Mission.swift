@@ -42,7 +42,7 @@ extension World {
         switch m {
         case 3, 5, 11, 12: return 10   // concrete, brick, steel, bridge
         case 4, 6, 7: return 5     // glass, sandbags, crates
-        case 10: return 2          // rubble
+        case 10, 13, 14: return 2  // rubble, exposed rebar
         case 1, 2: return 1        // soil, rock
         default: return 0
         }
@@ -61,6 +61,8 @@ extension World {
     /// Moves up to `amount` from the bank into this round's credits, losing `withdrawalLoss`
     /// of it. Returns the credits that arrived.
     @discardableResult func withdraw(_ amount: Int) -> Int {
+        // Dev mode has infinite credits already; it never touches the saved bank.
+        if devMode { return 0 }
         let taken = max(0,min(amount,bank))
         let arrived = Self.delivered(taken)
         bank -= taken; credits += arrived; broughtCredits += arrived
@@ -78,25 +80,21 @@ extension World {
     var missionReady: Bool { points >= Self.requirement }
     /// Why an offer can't be bought right now, or nil if it can.
     func refusal(_ offer: TroopOffer) -> String? {
-        if soldiers.count+offer.count > Self.maxSoldiers { return "PLATOON FULL" }
-        return refusal(cost:offer.cost)
+        refusal(cost:offer.cost)
     }
     /// Why `cost` credits can't be spent right now, or nil if they can.
     func refusal(cost: Int) -> String? {
-        cost > credits ? "NEED \(cost-credits) CR" : nil
+        !devMode && cost > credits ? "NEED \(cost-credits) CR" : nil
     }
     /// Buys an offer and lands it at `x` inside the deployment zone.
     @discardableResult func purchase(_ offer: TroopOffer, at x: Double) -> Bool {
         guard Self.deployZone.contains(x) else { status = "OUTSIDE DEPLOYMENT ZONE · PLACE TROOPS IN THE LANDING ZONE"; return false }
         if let reason = refusal(offer) {
-            switch reason {
-            case "PLATOON FULL": status = "PLATOON LIMIT REACHED · \(Self.maxSoldiers) SOLDIERS"
-            default: status = "REQUISITION DENIED · \(reason) FOR \(offer.name)"
-            }
+            status = "REQUISITION DENIED · \(reason) FOR \(offer.name)"
             onSound?(SoundEvent(cue:.cease))
             return false
         }
-        credits -= offer.cost; spent += offer.cost
+        if !devMode { credits -= offer.cost }; spent += offer.cost
         spawn(offer.count,kind:offer.kind,at:x)
         status = "\(offer.name) DEPLOYED · -\(offer.cost) CR · CLICK A STRUCTURE TO ATTACK"
         return true
@@ -126,7 +124,8 @@ extension World {
             objectives[i].remaining = objectives[i].initial
         }
         // The round's credits: the standing grant plus the payout for the last round's points.
-        carriedCredits = Self.credits(for:score)
+        // Points scored in dev mode never pay into the next round.
+        carriedCredits = devMode ? 0 : Self.credits(for:score)
         credits = Self.startingCredits+carriedCredits; broughtCredits = 0; banked = 0
         score = 0; spent = 0; popups = []; missionClock = 0; extracted = false
     }
@@ -204,7 +203,7 @@ extension World {
         }
         // Unspent credits go to the bank the first time the platoon extracts. Rounds that are
         // restarted or abandoned forfeit theirs, so the grant cannot be farmed into the bank.
-        if !extracted { banked = credits; bank += credits; credits = 0 }
+        if !extracted && !devMode { banked = credits; bank += credits; credits = 0 }
         extracted = true; paused = true
         status = "MISSION COMPLETE · PLATOON EXTRACTED"
         return true

@@ -11,6 +11,7 @@ final class GameAudio {
     static let variants: [SoundCue:Int] = [.shot:4,.explosion:4,.collapse:3,.rubble:3,.glass:3,.step:4,.deploy:1,.order:1,.cease:1,.select:1,.pause:1,.reset:1,.plane:1,.jet:1,.gun:1]
     /// Most copies of one sound file that can overlap before the oldest is cut off.
     static let copies = 4
+    static let defaultVolume: Float = 0.5
     private var samples: [SoundCue:[Data]] = [:]
     /// Reusable players for each sound file, keyed by cue and variant.
     private var pool: [SoundCue:[[AVAudioPlayer]]] = [:]
@@ -23,7 +24,7 @@ final class GameAudio {
     private var paused = false
     private(set) var available = false
     private(set) var muted = UserDefaults.standard.bool(forKey:"audioMuted")
-    private(set) var volume: Float = UserDefaults.standard.object(forKey:"audioVolume") == nil ? 0.5 : UserDefaults.standard.float(forKey:"audioVolume")
+    private(set) var volume: Float = UserDefaults.standard.object(forKey:"audioVolume") == nil ? GameAudio.defaultVolume : UserDefaults.standard.float(forKey:"audioVolume")
     init() {
         volume = max(0,min(1,volume))
         guard let root = Bundle.main.resourceURL?.appendingPathComponent("Sounds") else { return }
@@ -61,6 +62,12 @@ final class GameAudio {
     func adjustVolume(_ delta:Float) {
         volume=max(0,min(1,volume+delta)); UserDefaults.standard.set(volume,forKey:"audioVolume")
         // Stop old voices so a volume reduction takes effect immediately.
+        stopEffects(); sync(paused:paused,active:active)
+    }
+    /// Back to first-launch sound settings: sound on at half volume.
+    func resetSettings() {
+        UserDefaults.standard.removeObject(forKey:"audioMuted"); UserDefaults.standard.removeObject(forKey:"audioVolume")
+        muted = false; volume = Self.defaultVolume
         stopEffects(); sync(paused:paused,active:active)
     }
     /// An idle player for this sound file, creating one only until the file has `copies` of them.

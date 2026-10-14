@@ -11,9 +11,9 @@ extension GameView {
     func drawFireLayer(_ view: NSRect) {
         guard let ctx = NSGraphicsContext.current?.cgContext else { return }
         let margin = view.insetBy(dx:-80,dy:-80)
-        for b in world.bombers where margin.insetBy(dx:-120,dy:-60).contains(NSPoint(x:b.x,y:World.planeAltitude)) {
+        for b in world.bombers where margin.insetBy(dx:-120,dy:-60).contains(NSPoint(x:b.x,y:b.y)) {
             let ramp = b.x-b.heading*World.rampOffset
-            drawTransport(x:b.x,heading:b.heading,open:b.released > 0 || (ramp-b.aims[0])*b.heading > -world.bombLead(b.aims[0])-320,firebomber:true)
+            drawTransport(x:b.x,y:b.y,heading:b.heading,open:b.released > 0 || (ramp-b.aims[0])*b.heading > -world.bombLead(b.aims[0],from:b.y)-320,firebomber:true)
         }
         drawFlames(ctx,view)
         for bomb in world.fireBombs where margin.contains(NSPoint(x:bomb.position.x,y:bomb.position.y)) { drawCanister(ctx,bomb) }
@@ -89,15 +89,15 @@ extension GameView {
     /// Preview of a firebomb run at the pointer: the C-130's run-in line, each canister's
     /// fall, and the burning pool it will leave.
     func drawFirebombGhost(_ offer: SupportOffer,at x: Double) {
-        let h = World.heading(toward:x), c = World.cell, o = Self.flameOrange
+        let h = world.approach(toward:x), c = World.cell, o = Self.flameOrange
         let aims = h > 0 ? World.firebombAims(x) : World.firebombAims(x).reversed()
         let refused = world.refusal(offer) != nil
-        let start = aims[0]-h*world.bombLead(aims[0]), end = aims.last!-h*world.bombLead(aims.last!)
-        let alt = World.planeAltitude
+        let alt = world.transportAltitude
+        let start = aims[0]-h*world.bombLead(aims[0],from:alt), end = aims.last!-h*world.bombLead(aims.last!,from:alt)
         line([CGPoint(x:start-260*h,y:alt),CGPoint(x:end+60*h,y:alt)],o,1/zoom,0.3)
         polygon([CGPoint(x:end+60*h,y:alt),CGPoint(x:end+52*h,y:alt-4),CGPoint(x:end+52*h,y:alt+4)],o,0.35)
         for aim in aims {
-            let path = world.trajectory(from:Vec(x:aim-h*world.bombLead(aim),y:alt+14),velocity:World.firebombRelease(h))
+            let path = world.trajectory(from:Vec(x:aim-h*world.bombLead(aim,from:alt),y:alt+14),velocity:World.firebombRelease(h))
             for i in stride(from:0,to:path.count-1,by:3) {
                 line([CGPoint(x:path[i].x,y:path[i].y),CGPoint(x:path[i+1].x,y:path[i+1].y)],o,1.2/zoom,0.35)
             }
@@ -120,14 +120,14 @@ extension GameView {
             if seen.insert(my*4096+mx).inserted { rect(left+Double(mx)-1,top+Double(my)-1,2,2,Self.flameOrange,0.9) }
         }
         for b in world.bombers where b.x > 0 && b.x < World.width {
-            let px = left+b.x*sx, py = top+max(0,World.planeAltitude-World.top)*sy, h = b.heading
+            let px = left+b.x*sx, py = top+max(0,b.y-World.top)*sy, h = b.heading
             polygon([CGPoint(x:px+4*h,y:py),CGPoint(x:px-3*h,y:py-3),CGPoint(x:px-3*h,y:py+3)],Self.flameOrange)
         }
     }
     /// Screen-space labels over each firebomber.
     func drawBomberTags() {
         for b in world.bombers {
-            let p = toScreen(Vec(x:b.x,y:World.planeAltitude-60))
+            let p = toScreen(Vec(x:b.x,y:b.y-60))
             guard p.x > -60 && p.x < 1500 && p.y > 110 && p.y < 775 else { continue }
             text(b.done ? "FIRE BOMBER · RTB" : "FIRE BOMBER",p.x-34,p.y-14,9,Self.flameOrange,.bold,true)
         }

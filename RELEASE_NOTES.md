@@ -1,4 +1,4 @@
-# Raining Hell 0.3.0-rc.1
+# Raining Hell 0.3.0-rc.2
 
 **Early alpha / release candidate — work in progress. This is not a finished game.**
 
@@ -9,8 +9,10 @@ This candidate packages the first playable sandbox for feedback. UI, graphics, a
 - One large test map (720 × 150 blocks, about seven times the original area) in six sectors: landing zone and outpost bunker, no-man's land with a trench and wrecked tank, a river gorge and bridge, a ruined town with a church tower, a factory with a chimney and fuel tanks, and a hilltop fortress over a tunnel depot. All of it is destructible.
 - Zoomable, scrolling camera (25%–300%) with pinch, scroll wheel, keyboard, and middle-drag controls, a clickable minimap, parallax background layers, and sound that pans and fades with the camera.
 - Deploy individual soldiers or squads, select units, give attack and movement orders.
+- Deselecting: **A** and the dock button toggle between Select All and Deselect All, clicking the only selected soldier again deselects them, and Escape clears the selection before opening the pause menu.
 - Ballistic explosive rounds, debris, rain, muzzle flashes, and impact effects.
 - Support and load checks, falling masonry, collidable rubble, and rear walls that disappear with destroyed structures.
+- Reinforced concrete: buildings carry rebar, so they shrug off more of each blast and leave bent bars standing in the holes that keep damaged slabs hanging. Undercut a building on one side and it creaks over, snaps at a weak storey and falls on its side; knock out a whole storey and the floors above pancake down through the ones below.
 - New original synthesized audio: four gunfire variants, four explosions, three collapse rumbles, three rubble impacts, three glass breaks, four footsteps, six command/interface cues, and a seamless rain/wind loop.
 - Stereo positioning, bounded sound overlap, automatic ambience suspension when paused or inactive, mute, and saved volume preferences.
 - Universal macOS app, drag-to-Applications DMG, and portable ZIP with documentation.
@@ -27,6 +29,7 @@ This candidate packages the first playable sandbox for feedback. UI, graphics, a
 - RPG gunner (1,200): a hand-aimed troop. With only RPG gunners selected, an amber line previews each rocket's dropping flight toward the pointer; left-click fires. 7 rockets, a 7-second reload after each shot (listed in the requisition menu; clicking early reads RPG RELOADING), grenadier walking pace, half pace while reloading. In mixed selections the gunners hold fire and show no aim line.
 
 - Limited ammo: riflemen carry 40 rounds and grenadiers 12. Ammo bars over each soldier turn amber with a LOW tag when running low and show a blinking red NO AMMO tag when empty. The status bar counts low and empty soldiers, and the minimap colours them to match.
+- Support balance: air strikes hit much harder for the same price; no weapon's damage went down. Gun run: 120 rounds (was 80), 12 px blasts (was 8), 30-second cooldown (was 45). Firebombs: eight canisters (was six), each with a bigger burst charge and more napalm; burning gel heats what it clings to harder; concrete, brick, steel, and rubble give way to fire sooner; 90-second cooldown (was 120). Firebombs called near the map edge no longer burst uselessly off-map. Per credit, a gun run now scores about three times what it did and firebombs about six times, both well ahead of an RPG gunner's load.
 - Support tab: the requisition menu now has TROOPS and SUPPORT tabs (**D** / **S**, or the new Support button). The first support option is a 750-point supply crate. A cargo plane flies overhead from the west and drops it by parachute onto the chosen spot, where it rearms every soldier within its ring for 45 seconds. All support shares a 20-second cooldown, so future air strikes can't be spammed.
 - Gun run (1,000): a second support option. Click the ground and a twin-engine ground-attack jet dives in from the west, walks an 80-round 30 mm burst across a 480 px strip, then pulls up and leaves. Buildings in its line of fire shield what's behind them. It has new jet flyover and cannon-burst sounds and shares the support cooldown.
 - Firebombs (2,000): a third support option. A C-130 drops a stick of six napalm canisters that punch into buildings and start fires. A new cell-by-cell fire simulation burns room contents, crates, and sandbags. Heat rises and spreads to nearby fuel, shatters glass, and slowly spalls concrete, brick, and steel. Smoke and embers rise from the fires, and they die out on their own once the fuel is gone. The result is slow, steady damage over a few minutes rather than one big blast. 120-second cooldown.
