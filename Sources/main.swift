@@ -24,7 +24,12 @@ if CommandLine.arguments.contains("--self-test") {
     w.speed = 4; w.advance(1/60)
     check(abs(w.elapsed-real-4.0/60) < 1e-9,"4x speed runs four simulation steps per frame")
     w.cycleSpeed()
-    check(w.speed == 1,"speed cycles 4x back to 1x")
+    check(w.speed == 0.25,"speed cycles 4x back to 0.25x")
+    let slow = w.elapsed
+    w.advance(1/60)
+    check(abs(w.elapsed-slow-0.25/60) < 1e-9,"0.25x speed runs a quarter-length step per frame")
+    w.cycleSpeed()
+    check(w.speed == 1,"speed cycles 0.25x up to 1x")
     w.cease()
     check(w.soldiers.allSatisfy{$0.target == nil},"cease fire clears all orders")
     let x = w.soldiers[0].position.x
@@ -58,6 +63,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.center(); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(view)
         // Headless screenshots must not pull focus from whatever the user is doing.
         if !CommandLine.arguments.contains("--screenshot") { NSApp.activate(ignoringOtherApps:true) }
+        // Full screen is saved like the other settings and restored on the next launch.
+        if view.persistent {
+            for (name,on) in [(NSWindow.didEnterFullScreenNotification,true),(NSWindow.didExitFullScreenNotification,false)] {
+                NotificationCenter.default.addObserver(forName:name,object:window,queue:.main) { _ in UserDefaults.standard.set(on,forKey:"fullScreen") }
+            }
+            if UserDefaults.standard.bool(forKey:"fullScreen") { DispatchQueue.main.async { self.window.toggleFullScreen(nil) } }
+        }
+        // --level n builds operation n (1-based) for the previews below; --cleared n opens the lobby with n cleared.
+        if let index = CommandLine.arguments.firstIndex(of:"--level"), CommandLine.arguments.count > index+1, let n = Int(CommandLine.arguments[index+1]) {
+            World.select(n-1); view.world.reset(); view.resetCamera()
+        }
+        if let index = CommandLine.arguments.firstIndex(of:"--cleared"), CommandLine.arguments.count > index+1, let n = Int(CommandLine.arguments[index+1]) { view.world.cleared = n }
         if CommandLine.arguments.contains("--preview") {
             view.inMenu = false; view.help = false
             view.world.spawn(4)
@@ -69,6 +86,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             view.world.unit = World.scale; view.world.fill(108,48,44,7,0); view.world.unit = 1
             view.world.structureDirty = true
             for _ in 0..<35 { view.world.update(1.0/60) }
+        }
+        // --water-preview dam|splash|surface|drone|bridge [seconds] stages water scenes: at
+        // Irongate Pass's reservoir the dam cut away so the lake pours out, a shell bursting on
+        // the lake bed or at its surface, or a drone flown into the lake; or the Kessel bridge
+        // blown down into the river.
+        if let index = CommandLine.arguments.firstIndex(of:"--water-preview") {
+            let args = CommandLine.arguments
+            view.inMenu = false; view.help = false
+            let mode = args.count > index+1 ? args[index+1] : "dam"
+            World.select(mode == "bridge" ? 0 : 2); view.world.reset()
+            let w = view.world, S = World.scale
+            let seconds = args.count > index+2 ? Double(args[index+2]) ?? 3 : 3
+            let lake = Double(705*S)*World.cell
+            var bed = Double(64*S)*World.cell+World.top
+            while w.material(at:Vec(x:lake,y:bed)) == 0 && bed < World.bottom { bed += World.cell }
+            switch mode {
+            case "splash": w.explode(at:Vec(x:lake,y:bed-3),radius:34)
+            case "surface": w.explode(at:Vec(x:lake,y:Double(64*S)*World.cell+World.top+2),radius:34)
+            case "drone":
+                w.credits = 5_000; w.purchase(World.support[3],at:lake)
+                for _ in 0..<900 where w.drone?.piloted != true { w.update(1.0/60) }
+                w.steerDrone(toward:Vec(x:lake,y:w.drone?.position.y ?? 0))
+                for _ in 0..<150 { w.update(1.0/60) }
+                w.steerDrone(toward:Vec(x:lake,y:bed))
+                for _ in 0..<900 where w.drone != nil { w.update(1.0/60) }
+            case "bridge":
+                for x in stride(from:266,through:314,by:6) { w.explode(at:Vec(x:Double(x*S)*World.cell,y:Double(World.bridgeDeck*S)*World.cell+World.top+4),radius:40) }
+            default: w.unit = S; w.fill(756,40,30,50,0); w.unit = 1; w.structureDirty = true
+            }
+            for _ in 0..<Int(seconds*60) { w.update(1.0/60) }
+            switch mode {
+            case "dam": view.camera = Vec(x:6150,y:700); view.zoom = 1.1
+            case "bridge": view.camera = Vec(x:Double(290*S)*World.cell,y:Double(75*S)*World.cell+World.top); view.zoom = 2
+            case "drone": view.camera = w.wrecks.last.map{ Vec(x:$0.position.x,y:$0.position.y-40) } ?? Vec(x:lake,y:620); view.zoom = 3
+            default: view.camera = Vec(x:lake,y:620); view.zoom = 1.6
+            }
+            view.clampCamera()
         }
         if CommandLine.arguments.contains("--debrief-preview") {
             view.inMenu = false; view.help = false
@@ -151,7 +205,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let index = CommandLine.arguments.firstIndex(of:"--bank"), CommandLine.arguments.count > index+1, let n = Int(CommandLine.arguments[index+1]) { view.world.bank = n }
         if let index = CommandLine.arguments.firstIndex(of:"--withdraw"), CommandLine.arguments.count > index+1, let n = Int(CommandLine.arguments[index+1]) { view.withdrawal = n }
         if let index = CommandLine.arguments.firstIndex(of:"--speed"), CommandLine.arguments.count > index+1,
-           let speed = Int(CommandLine.arguments[index+1]), World.speeds.contains(speed) { view.world.speed = speed }
+           let speed = Double(CommandLine.arguments[index+1]), World.speeds.contains(speed) { view.world.speed = speed }
         // --camera x,y,zoom frames any part of the level, e.g. 2880,700,0.25 for the whole front.
         if let index = CommandLine.arguments.firstIndex(of:"--camera"), CommandLine.arguments.count > index+1 {
             let v = CommandLine.arguments[index+1].split(separator:",").compactMap{Double($0)}
@@ -165,12 +219,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--targets") { view.showTargets = true }
         if CommandLine.arguments.contains("--esc") { view.inMenu = false; view.openEscMenu() }
         if CommandLine.arguments.contains("--esc-settings") { view.inMenu = false; view.openEscMenu(); view.escPage = .settings }
+        if CommandLine.arguments.contains("--esc-controls") { view.inMenu = false; view.openEscMenu(); view.escPage = .settings; view.settingsTab = .controls }
+        // --rebind action shows the CONTROLS tab waiting for that action's new key.
+        if let index = CommandLine.arguments.firstIndex(of:"--rebind"), CommandLine.arguments.count > index+1 { view.rebinding = KeyAction(rawValue:CommandLine.arguments[index+1]) }
         if CommandLine.arguments.contains("--esc-exit") { view.inMenu = false; view.openEscMenu(); view.escPage = .exit }
-        // --lobby-settings [danger [save|settings]] opens the lobby settings on a tab, or a danger confirmation.
+        // --lobby-settings [controls | danger [save|settings]] opens the lobby settings on a tab, or a danger confirmation.
         if let index = CommandLine.arguments.firstIndex(of:"--lobby-settings") {
             let rest = CommandLine.arguments.dropFirst(index+1)
             view.lobbySettings = true
             if rest.first == "danger" { view.settingsTab = .danger }
+            if rest.first == "controls" { view.settingsTab = .controls }
             if rest.dropFirst().first == "save" { view.confirming = .deleteSave; view.confirmEntry = "DEL" }
             if rest.dropFirst().first == "settings" { view.confirming = .resetSettings; view.confirmEntry = "RESET" }
         }

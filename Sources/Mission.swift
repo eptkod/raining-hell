@@ -10,6 +10,8 @@ struct Objective {
     /// A bridge span: destroyed as soon as it is cut through, and then whatever still
     /// stands over the gorge falls into the river.
     var span = false
+    /// Voxel row of the riverbed under a span, where its wreckage comes to rest.
+    var bed = 0
     var initial = 0
     var remaining = 0
     var destroyed = false
@@ -31,8 +33,8 @@ struct TroopOffer {
 struct Popup { var position: Vec; var points: Int; var life: Double = 1.1; var major = false }
 
 extension World {
-    /// Points needed before the platoon may extract.
-    static let requirement = 150_000
+    /// Points needed before the platoon may extract on the selected level.
+    static var requirement: Int { spec.requirement }
     /// Share of an objective's original structure that must be removed to destroy it.
     static let objectiveThreshold = 0.6
     /// Blocks inside a high-value target are worth this many times their base value.
@@ -48,8 +50,9 @@ extension World {
         }
     }
     static func isStructure(_ m: UInt8) -> Bool { (m >= 3 && m <= 7) || m == 11 || m == 12 }
-    /// Credits every round opens with, before any carried over from the last round.
-    static let startingCredits = 2_000
+    /// Credits every round of the selected level opens with, before any carried over from
+    /// the last round. Set per level by its funds profile; see `LevelSpec`.
+    static var startingCredits: Int { spec.grant }
     /// Share of a round's final points paid out as credits at the start of the next round:
     /// 150,000 points buys 6,000 credits.
     static let creditRate = 0.04
@@ -100,20 +103,14 @@ extension World {
         return true
     }
 
-    /// Lays out the objectives and per-voxel worth for the freshly built map.
-    func setupMission() {
+    /// Adds a high-value target over design-unit bounds x0..<x1, y0..<y1. A bridge span
+    /// passes the design row of the riverbed it falls to.
+    func target(_ name: String,_ x0: Int,_ y0: Int,_ x1: Int,_ y1: Int,_ bonus: Int, span bed: Int? = nil) {
         let S = Self.scale
-        func target(_ name: String,_ x0: Int,_ y0: Int,_ x1: Int,_ y1: Int,_ bonus: Int, span: Bool = false) -> Objective {
-            Objective(name:name,x0:x0*S,y0:y0*S,x1:x1*S,y1:y1*S,bonus:bonus,span:span)
-        }
-        objectives = [target("OUTPOST BUNKER",108,24,152,58,1500),
-                      // Only the deck over the gorge counts: dropping the span takes the bridge out,
-                      // without digging out the abutments and footings buried in the banks.
-                      target("KESSEL BRIDGE",262,Self.bridgeDeck,318,Self.bridgeDeck+2,5000,span:true),
-                      target("CHURCH BELL TOWER",424,0,432,58,2000),
-                      target("FUEL DEPOT & STACK",546,6,577,58,4000),
-                      target("GUN EMPLACEMENT",667,24,686,33,3000),
-                      target("TUNNEL DEPOT",600,38,700,49,4000)]
+        objectives.append(Objective(name:name,x0:max(0,x0)*S,y0:max(0,y0)*S,x1:min(Self.columns/S,x1)*S,y1:min(Self.rows/S,y1)*S,bonus:bonus,span:bed != nil,bed:(bed ?? 0)*S))
+    }
+    /// Scores the objectives the map builder placed and sets per-voxel worth for the freshly built map.
+    func setupMission() {
         worth = voxels.map { Self.points($0) }
         for i in objectives.indices {
             let o = objectives[i]
@@ -150,15 +147,17 @@ extension World {
     /// structure solver drops it all into the river as rubble instead of leaving stubs
     /// overhanging the banks and pier walls that troops can't pass.
     func dropSpan(_ o: Objective) {
-        let S = Self.scale
         func clear(_ x: Int, _ y: Int) {
             let i = index(x,y)
             if voxels[i] == 12 { voxels[i] = 0; worth[i] = 0 }
         }
         for x in o.x0..<o.x1 {
             let below = voxels[index(x,o.y1)]
-            if x == o.x0 || x == o.x1-1 || below == 1 || below == 2 { for y in o.y0..<o.y1 { clear(x,y) } }
-            clear(x,Self.riverBed*S-1)
+            // The span's end columns are severed right down to the riverbed, so arched
+            // spandrels can't keep an end bay hanging from its abutment.
+            if x == o.x0 || x == o.x1-1 { for y in o.y0..<max(o.y1,o.bed) { clear(x,y) } }
+            else if below == 1 || below == 2 { for y in o.y0..<o.y1 { clear(x,y) } }
+            clear(x,o.bed-1)
         }
         structureDirty = true
     }
@@ -175,7 +174,7 @@ extension World {
         if popups.count > 48 { popups.removeFirst(popups.count-48) }
         if !wasReady && missionReady {
             onSound?(SoundEvent(cue:.select))
-            status = "MISSION REQUIREMENT MET · PRESS X TO EXTRACT OR KEEP DESTROYING"
+            status = "MISSION REQUIREMENT MET · PRESS \(Keybinds.shared.label(.extract)) TO EXTRACT OR KEEP DESTROYING"
         }
     }
     func updateMission(_ dt: Double) {
@@ -195,6 +194,9 @@ extension World {
             }
         }
     }
+    /// Whether `level` can be started: the first always, each later one once the one before
+    /// it is cleared, and all of them in dev mode.
+    func unlocked(_ level: Int) -> Bool { devMode || level <= cleared }
     /// Ends the mission if the point requirement is met.
     @discardableResult func extract() -> Bool {
         guard missionReady else {
@@ -203,7 +205,10 @@ extension World {
         }
         // Unspent credits go to the bank the first time the platoon extracts. Rounds that are
         // restarted or abandoned forfeit theirs, so the grant cannot be farmed into the bank.
-        if !extracted && !devMode { banked = credits; bank += credits; credits = 0 }
+        if !extracted && !devMode {
+            banked = credits; bank += credits; credits = 0
+            cleared = max(cleared,Self.level+1)
+        }
         extracted = true; paused = true
         status = "MISSION COMPLETE · PLATOON EXTRACTED"
         return true

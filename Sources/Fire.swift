@@ -48,7 +48,7 @@ struct FireBomber {
 ///   like any other and feeds the structural solver, so a long fire can bring a floor down.
 /// * Gel with nothing to cling to runs down until it lands on something.
 struct FireField {
-    static let count = World.columns*World.rows
+    static var count: Int { World.columns*World.rows }
     /// Flame intensity, 0 (out) to 1 (fully involved).
     var flame = [Float](repeating:0,count:count)
     /// Seconds of full-intensity burning left in a cell's own fuel; -1 until it is first needed.
@@ -169,6 +169,8 @@ extension World {
     /// Puts heat into a cell: fuel moves toward ignition, everything else toward failure.
     func heatCell(_ n: Int, _ amount: Float) {
         guard fire.flame[n] <= 0 else { return }
+        // Nothing under water catches, and soaked fuel has to steam dry first.
+        guard water.mass[n] < 0.25 else { return }
         let m = voxels[n]
         if let tough = Self.heatToughness(m) {
             fire.scorch[n] += amount
@@ -179,7 +181,7 @@ extension World {
         }
         guard selfBurnable(n), ownFuel(n) > 0 else { return }
         if fire.heat[n] == 0 { fire.warm.append(n) }
-        fire.heat[n] += amount
+        fire.heat[n] += amount*(1-0.85*water.soak[n])
         if fire.heat[n] >= ignitionPoint(n) { ignite(n,0.15) }
     }
     /// Removes a block destroyed by fire, scoring it like a blasted one.
@@ -353,6 +355,15 @@ extension World {
             var f = fire.flame[i]
             guard f > 0 else { fire.listed[i] = false; continue }
             let x = i%cols, y = i/cols, m = voxels[i]
+            // Water floods the fire out in a burst of steam. Napalm floats and burns on.
+            if water.mass[i] > 0.25 && fire.gel[i] <= 0 {
+                fire.flame[i] = 0; fire.listed[i] = false
+                if smoke > 0 {
+                    smoke -= 1
+                    particles.append(Particle(position:Vec(x:(Double(x)+0.5)*Self.cell,y:Double(y)*Self.cell+Self.top),velocity:Vec(x:(water.random()-0.5)*20,y:-30-water.random()*30),life:1.5+water.random(),total:2.5,kind:Self.mistKind,size:6+water.random()*6))
+                }
+                continue
+            }
             let own = selfBurnable(i)
             if !own && fire.gel[i] <= 0 { fire.flame[i] = 0; fire.listed[i] = false; continue }
             // Gel with nothing under it runs down; gel on a wall face slowly slides.

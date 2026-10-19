@@ -87,7 +87,8 @@ struct Blast { var position: Vec; var age: Double = 0; var radius: Double }
 struct Fixture { var x: Int; var y: Int; var w: Int; var h: Int }
 /// Voxel bounds (inclusive) of an interior room or a window pane, used only for drawing.
 struct CellRect { var x0: Int; var y0: Int; var x1: Int; var y1: Int }
-/// Still water filling empty cells below `row` between two columns.
+/// Water a level starts with: every open cell below `row` between two columns, down to the
+/// first solid. `World.seedWater` turns pools into live water; see `WaterField`.
 struct Pool { var x0: Int; var x1: Int; var row: Int }
 struct Landmark { var name: String; var x: Double; var y: Double }
 
@@ -95,12 +96,22 @@ final class World {
     /// Voxels per layout unit along each axis. The map is laid out on an 8 px design
     /// grid; each design cell is subdivided into scale×scale voxels.
     static let scale = 2
-    static let columns = 720*scale
-    static let rows = 150*scale
+    /// The operation being played: an index into `LevelSpec.all`. Change it only through
+    /// `select`, then `reset` the world, since the map's size follows it.
+    static private(set) var level = 0
+    static var spec: LevelSpec { LevelSpec.all[level] }
+    /// Map size in voxels, set from the selected level's width and height.
+    static private(set) var columns = LevelSpec.all[0].columns*scale
+    static private(set) var rows = (150+LevelSpec.all[0].lift)*scale
+    /// Switches to another operation. Worlds built before this must be `reset` before use.
+    static func select(_ level: Int) {
+        self.level = max(0,min(LevelSpec.all.count-1,level))
+        columns = spec.columns*scale; rows = (150+spec.lift)*scale
+    }
     static let cell = 8.0/Double(scale)
     static let top = 104.0
-    static let width = Double(columns)*cell
-    static let bottom = top+Double(rows)*cell
+    static var width: Double { Double(columns)*cell }
+    static var bottom: Double { top+Double(rows)*cell }
     var voxels = [UInt8](repeating: 0, count: columns*rows)
     var onSound: ((SoundEvent) -> Void)?
     var chunks: [FallingChunk] = []
@@ -115,6 +126,10 @@ final class World {
     var paneOf = [Int32](repeating: -1, count: columns*rows)
     var pools: [Pool] = []
     var landmarks: [Landmark] = []
+    /// Ground profile east of the landing zone: design-unit (column, surface row) keys
+    /// joined by straight runs, and the column ranges where the ground is broken up.
+    var terrain: [(x: Int, row: Int)] = []
+    var rough: [Range<Int>] = []
     // Mission scoring: points each voxel pays when destroyed, objectives, and the running total.
     var worth = [UInt8](repeating: 0, count: columns*rows)
     /// Reinforced foundation cells: ground slabs, bridge piers, and the footings sunk beneath them.
@@ -145,6 +160,10 @@ final class World {
     /// withdrawn in the lobby at a loss; the game view persists it through `onBankChange`.
     var bank = 0 { didSet { if bank != oldValue { onBankChange?(bank) } } }
     var onBankChange: ((Int) -> Void)?
+    /// Operations cleared in order: extracting from level n (0-based) opens level n+1. The
+    /// game view persists it through `onProgress`; like the bank, `reset` keeps it.
+    var cleared = 0 { didSet { if cleared != oldValue { onProgress?(cleared) } } }
+    var onProgress: ((Int) -> Void)?
     /// Credits deposited when this round was extracted; shown in the debrief.
     var banked = 0
     /// Credits spent on troops and support this round.
@@ -172,11 +191,19 @@ final class World {
     /// Seconds until another firebomb run can be called.
     var firebombCooldown = 0.0
     var bombers: [FireBomber] = []
+    /// The kamikaze drone in the air, if any; only one flies at a time. See `Drone`.
+    var drone: Drone?
+    /// Drones shorted out in water, sinking or lying where they came to rest.
+    var wrecks: [Drone] = []
+    /// Seconds until another drone can be called.
+    var droneCooldown = 0.0
     var fireBombs: [FireBomb] = []
     var gelDrops: [GelDrop] = []
     var embers: [Ember] = []
     /// Every fire on the map; see `FireField`.
     var fire = FireField()
+    /// Every drop of water on the map; see `WaterField`.
+    var water = WaterField()
     /// Whether the current firebomb run's first canister has burst, for its status line.
     var bombed = false
     /// Set when fire shatters glass during a step, so the step plays one glass cue.
@@ -191,10 +218,11 @@ final class World {
     var rounds = 0
     var nextID = 1
     var paused = false
-    /// Game speed multiplier. Each frame runs `speed` fixed-size steps rather than one long
-    /// step, so 2× and 4× play out exactly like 1× (same arcs, same collapses), only faster.
-    var speed = 1
-    static let speeds = [1,2,4]
+    /// Game speed multiplier. Above 1× each frame runs `speed` fixed-size steps rather than one
+    /// long step, so 2× and 4× play out exactly like 1× (same arcs, same collapses), only faster.
+    /// 0.25× runs one quarter-length step per frame so slow motion stays smooth.
+    var speed = 1.0
+    static let speeds = [0.25,1,2,4]
     var shake = 0.0
     /// How much of an event at a world point (spanning `margin` world units around it) is on
     /// screen, from 0 (unseen) to 1 (fully in frame). Without a view everything counts as visible.
@@ -263,23 +291,29 @@ final class World {
     static let riverBed = 83
     /// Surface of the ford: two rows of water over the bed.
     static let riverSurface = riverBed-2
-    func bridge() {
-        let deck = Self.bridgeDeck, bed = Self.riverBed
-        fill(252, deck, 76, 2, 12)
-        for px in [280,298] {
+    /// Lays the gorge's bridge `dx` columns east of the first operation's and `dy` rows
+    /// lower, with its pool of river water and its span objective.
+    func crossing(_ name: String, dx: Int = 0, dy: Int = 0, bonus: Int = 5000) {
+        let deck = Self.bridgeDeck+dy, bed = Self.riverBed+dy
+        pools.append(Pool(x0:262+dx,x1:318+dx,row:bed-2))
+        // Only the deck over the gorge counts: dropping the span takes the bridge out,
+        // without digging out the abutments and footings buried in the banks.
+        target(name,262+dx,deck,318+dx,deck+2,bonus,span:bed)
+        fill(252+dx, deck, 76, 2, 12)
+        for px in [280+dx,298+dx] {
             fill(px, deck+2, 3, bed-deck-2, 12)
             // Spread footing: wider than the pier and keyed three cells into the riverbed.
             fill(px-3, bed, 9, 3, 12)
             reinforce(px-3, bed-4, 9, 7)
         }
         // Abutments: solid seats under each end of the deck, buried in the bank.
-        fill(252, deck+2, 10, 12, 12); reinforce(252, deck, 10, 14)
-        fill(318, deck+2, 10, 12, 12); reinforce(318, deck, 10, 14)
+        fill(252+dx, deck+2, 10, 12, 12); reinforce(252+dx, deck, 10, 14)
+        fill(318+dx, deck+2, 10, 12, 12); reinforce(318+dx, deck, 10, 14)
         // Each end of the deck slopes down to the approach road, one or two voxels per
         // column, so troops walk up onto it instead of meeting a wall at head height.
         let u = unit, top = deck*u
         unit = 1
-        for (end,inner) in [(252*u,260*u),(328*u-1,320*u)] {
+        for (end,inner) in [((252+dx)*u,(260+dx)*u),((328+dx)*u-1,(320+dx)*u)] {
             let dir = inner > end ? 1 : -1, outside = end-dir
             var ground = top
             while ground < Self.rows && !troopSolid(outside,ground) { ground += 1 }
@@ -346,19 +380,15 @@ final class World {
         }
     }
     func surfaceRow(_ x: Int) -> Int {
-        if x < 180 { return 56 + Int(sin(Double(x)*0.052)*1.5) + (x > 145 ? Int(Double(x-145)*0.13) : 0) }
-        // Keyframed profile: no-man's land, river gorge, town, factory, then the fortified ridge.
-        // The embankments either side of the gorge rise flush with the bridge deck, so once
-        // the span is down troops can still walk off the ends and down the banks.
-        let deck = Self.bridgeDeck
-        let keys = [(179,60),(206,60),(240,deck),(262,deck),(277,Self.riverBed),(303,Self.riverBed),(318,deck),(324,deck),(327,58),
-                    (578,58),(600,47),(624,33),(694,33),(708,38),(719,41)]
-        var row = 60.0
-        for k in 1..<keys.count where x <= keys[k].0 {
-            let a = keys[k-1], b = keys[k], t = Double(x-a.0)/Double(b.0-a.0)
-            row = Double(a.1)+Double(b.1-a.1)*t; break
+        // The landing zone is the same rolling ground on every level, lowered by its lift.
+        let lift = Self.spec.lift
+        if Self.level == 0 && x < 180 { return lift + 56 + Int(sin(Double(x)*0.052)*1.5) + (x > 145 ? Int(Double(x-145)*0.13) : 0) }
+        var row = Double(lift+60)
+        for k in 1..<terrain.count where x <= terrain[k].x {
+            let a = terrain[k-1], b = terrain[k], t = Double(x-a.x)/Double(b.x-a.x)
+            row = Double(a.row)+Double(b.row-a.row)*t; break
         }
-        let rough = (x < 240 || (x > 578 && x < 624)) ? Int((sin(Double(x)*0.13)+sin(Double(x)*0.051))*0.8) : 0
+        let rough = self.rough.contains { $0.contains(x) } ? Int((sin(Double(x)*0.13)+sin(Double(x)*0.051))*0.8) : 0
         return Int(row.rounded())+rough
     }
     func reset() {
@@ -370,11 +400,14 @@ final class World {
         footings = [Bool](repeating: false, count: Self.columns*Self.rows)
         rebar = [UInt8](repeating: 0, count: Self.columns*Self.rows)
         rooms = []; roomOf = [Int32](repeating: -1, count: Self.columns*Self.rows)
-        soldiers = []; shots = []; particles = []; blasts = []; crates = []; planes = []; jets = []; gunRunCooldown = 0; skylineClock = 0; supportSide = nil; target = nil
+        soldiers = []; shots = []; particles = []; blasts = []; crates = []; planes = []; jets = []; drone = nil; wrecks = []; droneCooldown = 0; gunRunCooldown = 0; skylineClock = 0; supportSide = nil; target = nil
         resetFire()
-        elapsed = 0; destroyed = 0; rounds = 0; nextID = 1; paused = false; speed = 1; seed = 42
-        status = "PRESS E OR CLICK DEPLOY TO SPEND CREDITS ON TROOPS"
+        elapsed = 0; destroyed = 0; rounds = 0; nextID = 1; paused = false; speed = 1.0; seed = 42
+        status = "PRESS \(Keybinds.shared.label(.troops)) OR CLICK DEPLOY TO SPEND CREDITS ON TROOPS"
         let S = Self.scale
+        reinforcement = Self.spec.reinforcement
+        objectives = []; pools = []; fixtures = []; landmarks = []
+        (terrain,rough) = Self.terrain(for:Self.level)
         for x in 0..<Self.columns {
             let surface = surfaceRow(x/S)*S
             for y in surface..<Self.rows {
@@ -382,82 +415,15 @@ final class World {
             }
         }
         unit = S
-        defer { unit = 1 }
-        // Sector 1 · LZ Alpha and a small, fully voxel-built observation bunker.
-        fill(108, 34, 44, 3, 3)
-        fill(108, 37, 3, 20, 3); fill(149, 37, 3, 22, 3)
-        fill(108, 46, 44, 2, 3); fill(108, 55, 44, 3, 3)
-        fill(120, 37, 2, 9, 3); fill(136, 37, 2, 9, 3)
-        fill(113, 40, 7, 5, 4); fill(127, 40, 9, 5, 4); fill(141, 40, 8, 5, 4)
-        fill(124, 48, 2, 7, 3); fill(108, 50, 3, 6, 0)
-        fill(114, 31, 3, 3, 3); fill(144, 31, 3, 3, 3)
-        fill(127, 29, 7, 5, 5)
-        fill(129, 24, 1, 5, 11)
-        // Sandbag line and cargo crates.
-        fill(87, 53, 11, 3, 6)
-        fill(156, 54, 6, 5, 7); fill(163, 55, 5, 5, 7)
-        room(108, 36, 151, 45, floor: 46, ceiling: 36)
-        room(108, 46, 151, 54, floor: 55, ceiling: 47)
-        fixtures = [Fixture(x:127,y:49,w:6,h:4)]
-        // Sector 2 · No-man's land: shell craters, a stepped trench, and a burnt-out tank.
-        for (cx,r) in [(188,3),(199,2),(236,4)] { carve(cx, surfaceRow(cx)-1, r+1, r) }
-        for i in 0..<18 { fill(209+i, surfaceRow(209+i), 1, min(3,i+1,18-i), 0) }
-        fill(227, surfaceRow(227)-1, 4, 1, 6); fill(205, surfaceRow(205)-1, 3, 1, 6)
-        let tank = surfaceRow(242)
-        fill(240, tank-3, 13, 3, 11); fill(243, tank-5, 6, 2, 11); fill(249, tank-5, 7, 1, 11)
-        // Sector 3 · River gorge spanned by a two-pier concrete bridge, laid after the
-        // town so its east ramp meets the road beside the first building's footing.
-        pools = [Pool(x0:262,x1:318,row:Self.riverSurface)]
-        // Sector 4 · Ruined town: apartments, a church with a bell tower, a gutted block.
-        building(330, 28, 3, 58)
-        building(366, 20, 5, 58)
-        building(394, 30, 2, 58, story:12)
-        fill(424, 6, 8, 52, 5); fill(426, 10, 4, 6, 0); fill(427, 10, 2, 2, 11)
-        for r in 0..<6 { fill(428-(r/2+1), r, (r/2+1)*2, 1, 5) }
-        building(444, 26, 4, 58, hut:false)
-        fill(458, 20, 12, 9, 0); fill(468, 19, 3, 2, 0)
-        for (i,h) in [2,3,4,3,2,1].enumerated() { fill(471+i, 58-h, 1, h, 10) }
-        fill(356, 56, 6, 2, 6); fill(386, 55, 4, 3, 7)
-        fixtures += [Fixture(x:340,y:47,w:5,h:3),Fixture(x:404,y:41,w:6,h:4),Fixture(x:375,y:20,w:4,h:3)]
-        bridge()
-        // Sector 5 · Factory hall, chimney stack, and fuel tanks.
-        building(488, 56, 1, 58, story:16)
-        for k in 0..<3 { for r in 1...3 { fill(492+k*12+(r-1)*3, 40-r, 12-(r-1)*3, 1, 3) } }
-        fill(548, 6, 5, 52, 5); fill(547, 6, 7, 2, 11); fill(547, 20, 7, 1, 11); fill(547, 34, 7, 1, 11)
-        for cx in [557.5,569.5] {
-            for y in 47...57 {
-                for x in Int(cx)-5...Int(cx)+6 where pow(Double(x)-cx,2)+pow(Double(y)-52.5,2) <= 30 { fill(x,y,1,1,11) }
-            }
-        }
-        fill(496, 52, 5, 4, 7); fill(506, 53, 4, 3, 7); fill(527, 52, 5, 4, 7)
-        fixtures += [Fixture(x:514,y:44,w:8,h:4)]
-        // Sector 6 · Ridge fortress, gun emplacement, and a concrete-lined tunnel depot.
-        fill(586, surfaceRow(586)-1, 6, 1, 6)
-        fill(612, surfaceRow(612)-1, 5, 1, 6)
-        building(630, 34, 2, 33, story:8)
-        // The fortress already sits at the limit of its overhang over the depot: no west-face trim.
-        fill(629, 15, 1, 1, 0); fill(629, 23, 1, 1, 0)
-        fill(646, 7, 1, 8, 11); fill(647, 7, 4, 3, 5)
-        fill(672, 29, 14, 4, 3); fill(676, 24, 8, 5, 11); fill(667, 25, 9, 2, 11)
-        fill(690, 31, 6, 2, 6)
-        // Shallow depot: the ridge and fortress rest on a ceiling slab carried by
-        // close-set columns placed under the fortress walls.
-        fill(604, 38, 96, 9, 0)
-        fill(604, 38, 96, 2, 3); fill(600, 47, 100, 2, 3)
-        for cx in [620,631,646,662,677,690] { fill(cx, 40, 2, 7, 3) }
-        fill(697, 40, 3, 7, 3)
-        room(604, 39, 696, 46, floor: 47, ceiling: 39)
-        fill(630, 33, 34, 5, 3)
-        fill(650, 43, 4, 4, 7); fill(655, 44, 4, 3, 7); fill(667, 45, 7, 2, 6)
-        fixtures += [Fixture(x:623,y:42,w:6,h:3),Fixture(x:640,y:26,w:5,h:3)]
+        raise(Self.level)
+        unit = 1
         layRebar()
         findPanes()
         fixtures = fixtures.map { Fixture(x:$0.x*S,y:$0.y*S,w:$0.w*S,h:$0.h*S) }
         pools = pools.map { Pool(x0:$0.x0*S,x1:$0.x1*S+S-1,row:$0.row*S) }
-        landmarks = [Landmark(name:"LZ / ALPHA",x:112,y:602),
-                     Landmark(name:"NO-MAN'S LAND",x:1590,y:500),Landmark(name:"KESSEL RIVER CROSSING",x:2100,y:500),
-                     Landmark(name:"HOLLOWAY / RUINED TOWN",x:2660,y:200),Landmark(name:"WORKS NO. 4",x:3920,y:400),
-                     Landmark(name:"RIDGE FORTRESS",x:5040,y:150),Landmark(name:"TUNNEL DEPOT",x:4900,y:470)]
+        seedWater()
+        // Objectives read west to east in the HUD.
+        objectives.sort { $0.x1 < $1.x1 }
         setupMission()
     }
     func ground(at x: Double) -> Double {
@@ -600,12 +566,12 @@ final class World {
         }
         if fired > 0 {
             status = fired == 1 ? "ROCKET AWAY" : "\(fired) ROCKETS AWAY"
-            if soldiers.contains(where:{ $0.selected && $0.kind.manualAim && $0.outOfAmmo }) { status += " · RPG OUT OF AMMO · [Q] CALL A SUPPLY CRATE" }
+            if soldiers.contains(where:{ $0.selected && $0.kind.manualAim && $0.outOfAmmo }) { status += " · RPG OUT OF AMMO · [\(Keybinds.shared.label(.support))] CALL A SUPPLY CRATE" }
         } else if reloading > 0 {
             status = "RPG RELOADING"
             onSound?(SoundEvent(cue:.cease))
         } else if empty > 0 {
-            status = "RPG OUT OF AMMO · [Q] CALL A SUPPLY CRATE"
+            status = "RPG OUT OF AMMO · [\(Keybinds.shared.label(.support))] CALL A SUPPLY CRATE"
             onSound?(SoundEvent(cue:.cease))
         }
         return fired
@@ -729,6 +695,7 @@ final class World {
         }
         if brokeGlass { onSound?(SoundEvent(cue:.glass,x:p.x)) }
         award(gained,at:p)
+        splashWater(at:p,radius:radius)
         for _ in 0..<16 {
             particles.append(Particle(position:p,velocity:Vec(x:(random-0.5)*230,y:(random-0.75)*220),life:0.4+random*0.6,total:1,kind:8,size:1.5+random*2))
         }
@@ -738,9 +705,9 @@ final class World {
     }
     /// Advances one real-time frame at the current game speed.
     func advance(_ dt: Double) {
-        for _ in 0..<speed { update(dt) }
+        if speed < 1 { update(dt*speed) } else { for _ in 0..<Int(speed) { update(dt) } }
     }
-    /// Steps to the next speed in `speeds`, wrapping from 4× back to 1×.
+    /// Steps to the next speed in `speeds`, wrapping from 4× back to 0.25×.
     func cycleSpeed() {
         speed = Self.speeds[((Self.speeds.firstIndex(of:speed) ?? 0)+1) % Self.speeds.count]
     }
@@ -801,7 +768,7 @@ final class World {
                 shots.append(Shot(position:origin,previous:origin,velocity:velocity,radius:s.kind.blastRadius))
                 s.cooldown = s.kind.reload+random*0.5; s.flash = 0.09; rounds += 1
                 s.ammo -= 1
-                if s.outOfAmmo { status = "\(s.kind.name) OUT OF AMMO · [Q] CALL A SUPPLY CRATE" }
+                if s.outOfAmmo { status = "\(s.kind.name) OUT OF AMMO · [\(Keybinds.shared.label(.support))] CALL A SUPPLY CRATE" }
             }
             soldiers[i] = s
         }
@@ -819,6 +786,8 @@ final class World {
                 if material(at:shot.position) != 0 || shot.position.y >= Self.bottom { hit = true; break }
                 if let fuse = shot.fuse, (shot.position.x-fuse)*shot.velocity.x >= 0 && (shot.previous.x-fuse)*shot.velocity.x < 0 { hit = true; break }
             }
+            // Rounds pass through water, kicking up a splash where they break the surface.
+            if !hit && waterAt(shot.position) > 0.5 && waterAt(shot.previous) < 0.5 { ripple(at:shot.position,shot.velocity) }
             if shot.rocket && !hit {
                 particles.append(Particle(position:shot.previous,velocity:Vec(x:(random-0.5)*16,y:(random-0.5)*16-8),life:0.7+random*0.5,total:1.4,kind:9,size:4+random*4))
             }
@@ -826,11 +795,14 @@ final class World {
         }
         shots = remaining
         updateSupport(dt)
+        updateDrone(dt)
         updateFire(dt)
+        updateWater(dt)
         for i in particles.indices {
             particles[i].life -= dt
-            // Smoke (9) and fire soot (14) drift; soot billows as it rises.
+            // Smoke (9) and fire soot (14) drift; soot billows as it rises. Mist (16) hangs and spreads.
             if particles[i].kind == 14 { particles[i].size += 3*dt; particles[i].velocity.y *= exp(-0.15*dt) }
+            else if particles[i].kind == Self.mistKind { particles[i].size += 9*dt; particles[i].velocity = particles[i].velocity*exp(-1.2*dt) }
             else if particles[i].kind != 9 { particles[i].velocity.y += 280*dt }
             particles[i].position = particles[i].position+particles[i].velocity*dt
         }

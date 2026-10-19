@@ -1,8 +1,18 @@
-# Raining Hell 0.3.0-rc.2
+# Raining Hell 0.3.0-rc.3
 
 **Early alpha / release candidate — work in progress. This is not a finished game.**
 
 This candidate packages the first playable sandbox for feedback. UI, graphics, audio, physics, and gameplay are subject to change. No public release has been published by the build scripts.
+
+## New in 0.3.0-rc.3
+
+- Six operations: Kessel Crossing, Marrow Ferry, Irongate Pass, Vestra Works, Saint Odile and The Citadel. Each front is its own country with unique landmarks, and each is wider, taller and better reinforced than the last, with a higher point requirement and its own starting grant. Levels unlock in order as you clear them.
+- Live water: rivers, lakes and reservoirs flow, spill through breaches, splash from blasts and soak into soil, rubble, sandbags and crates. Blow a dam and the lake pours out.
+- Kamikaze drone (support row 4): it flies in to the chosen point, then you pilot it with the pointer. It detonates on contact, on a click, on the detonate key, or falls when its battery runs out. Water shorts it out and the wreck sinks.
+- Support aircraft fly in from the nearer map edge; while placing support, **Q** forces a western approach and **E** an eastern one. Planes fly above the skyline and descend when tall buildings fall.
+- Rebindable keys: every in-game action can be rebound on the settings CONTROLS tab, in the lobby or the pause menu.
+- Game speed now also has a 0.25× slow-motion setting. Full screen is remembered between launches.
+- Apple Silicon only: current toolchains no longer ship the Intel Swift runtime.
 
 ## What's included
 
@@ -15,8 +25,8 @@ This candidate packages the first playable sandbox for feedback. UI, graphics, a
 - Reinforced concrete: buildings carry rebar, so they shrug off more of each blast and leave bent bars standing in the holes that keep damaged slabs hanging. Undercut a building on one side and it creaks over, snaps at a weak storey and falls on its side; knock out a whole storey and the floors above pancake down through the ones below.
 - New original synthesized audio: four gunfire variants, four explosions, three collapse rumbles, three rubble impacts, three glass breaks, four footsteps, six command/interface cues, and a seamless rain/wind loop.
 - Stereo positioning, bounded sound overlap, automatic ambience suspension when paused or inactive, mute, and saved volume preferences.
-- Universal macOS app, drag-to-Applications DMG, and portable ZIP with documentation.
-- Main menu with level select (only the test level for now).
+- Apple Silicon macOS app, drag-to-Applications DMG, and portable ZIP with documentation.
+- Main menu with level select.
 - Escape opens a pause menu: resume, return to the main menu, or quit. Cease fire is now on X only.
 - Mission scoring: buildings outscore ground, high-value targets (bridge, bell tower, fuel depot, gun emplacement, tunnel depot, outpost bunker) pay triple plus a destruction bonus, and you can extract with **E** only after reaching the mission's point requirement.
 
@@ -48,11 +58,11 @@ Scroll wheel, trackpad pinch, or **=** / **-** zoom around the pointer, and **0*
 
 ## Current limits
 
-- One map and soldier type. Soldiers cannot climb stairs or pass interior columns, so reaching far sectors means blasting a route; no enemies, campaign, soldier damage, saves, music, or advanced pathfinding.
+- Soldiers cannot climb stairs or pass interior columns, so reaching far sectors means blasting a route; no enemies, soldier damage, saves, music, or advanced pathfinding.
 - Structural physics is a gameplay approximation. Moving masonry sections do not collide with each other; they collide with terrain and settled rubble.
 - Audio is synthesized prototype sound design and will evolve with the game.
-- macOS 12+; Apple Silicon and Intel binaries included. Windows is planned later.
-- Local packages are ad-hoc signed, not Developer ID signed or Apple-notarized. Intel and the minimum macOS version have not been tested on dedicated hardware.
+- macOS 12+; Apple Silicon only. Windows is planned later.
+- Local packages are ad-hoc signed, not Developer ID signed or Apple-notarized. The minimum macOS version has not been tested on dedicated hardware.
 
 ## Candidate validation
 

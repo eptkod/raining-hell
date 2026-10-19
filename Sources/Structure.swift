@@ -494,6 +494,7 @@ extension World {
                     else { chunk.velocity=chunk.velocity*max(0.5,1-2*Double(crushed)/Double(chunk.cells.count)) }
                 }
             }
+            chunkInWater(&chunk,dt)
             if hit {
                 // The jolt of a leaning building's corner striking home snaps it.
                 moving += chunk.snap != nil && chunk.hinge != nil ? snapped(chunk) : crumble(chunk)
@@ -671,6 +672,8 @@ extension World {
                 // Fallen terrain was already scored; rubble is worth a little to clear.
                 voxels[index(x,y)] = terrain ? cell.material : 10
                 worth[index(x,y)] = terrain ? 0 : Self.points(10)
+                // Rubble sinks to the bottom and lifts the water it lands in.
+                displaceWater(index(x,y))
             }
             broken += 1
             if broken%4 == 0 && particles.count < 900 {

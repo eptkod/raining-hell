@@ -616,6 +616,226 @@ import Foundation
         for _ in 0..<600 { lean.update(1.0/60) }
         let wreck=(0..<World.columns).filter{ x in (0..<World.rows).contains{ lean.voxels[lean.index(x,$0)] == 10 } }
         check(lean.chunks.isEmpty && (wreck.min() ?? Int.max) < 85*S,"the wreck settles across the ground on the side it fell to")
+        let binds=Keybinds()
+        check(binds.action(for:12) == .support && binds.action(for:35) == .pause,"default keys: Q calls support, P still pauses")
+        check(binds.bind(.extract,12) && binds.key(.extract) == 12 && binds.key(.support) == 7 && binds.action(for:12) == .extract,"binding a used key swaps the two actions")
+        check(!binds.bind(.extract,53) && !binds.bind(.extract,18) && binds.key(.extract) == 12,"Esc and the number keys can't be bound")
+        binds.bind(.pause,35)
+        check(binds.action(for:49) == nil || binds.action(for:49) == .pause,"the old pause key is released or swapped when P takes pause")
+        binds.resetAll()
+        check(binds.isDefault && Set(KeyAction.allCases.map{binds.key($0)}).count == KeyAction.allCases.count,"reset restores defaults with no shared keys")
+        // Operations: each later one is larger and harder, opens with a viable grant, and
+        // stands, crosses and scores like the first.
+        let specs=LevelSpec.all, firstShare=Double(specs[0].requirement)/Double(World().availablePoints)
+        check(specs[0].name == "KESSEL CROSSING" && specs.count == 6,"six operations, opening at Kessel Crossing")
+        for (i,spec) in specs.enumerated() {
+            let name="OP-\(i+1) \(spec.name)"
+            check(spec.grant >= World.openingFloor && spec.grant >= World.cost(of:spec.funds.kit),"\(name) opens with its \(spec.funds.name.lowercased()) kit and at least a rifle squad and a gun run")
+            if i > 0 {
+                let last=specs[i-1]
+                check(spec.columns > last.columns && spec.lift > last.lift && spec.reinforcement > last.reinforcement && spec.requirement > last.requirement,"\(name) is wider, taller, better reinforced and asks more than the one before")
+                check(spec.grant >= specs[0].grant,"\(name) never opens with less than the first operation")
+            }
+            World.select(i)
+            let op=World()
+            check(op.credits == spec.grant && op.reinforcement == spec.reinforcement && World.columns == spec.columns*S,"\(name) builds at its own size, reinforcement and grant")
+            check(op.objectives.count == 6+i && op.objectives.allSatisfy{ $0.initial > 0 },"\(name) has \(6+i) objectives, each with structure to destroy")
+            let share=Double(spec.requirement)/Double(op.availablePoints)
+            check(share >= firstShare*0.95 && share <= firstShare*1.2,"\(name) asks for about the same share of its points as the first operation (\(Int(share*100))%)")
+            check(op.transportAltitude+24 < op.skyline-200 && op.jetCruise >= World.top-World.skyHeight,"\(name) aircraft clear the tallest building and stay in camera reach")
+            for _ in 0..<600 { op.update(1.0/60) }
+            print("\(name) intact map detached blocks: \(op.collapsed)")
+            check(op.collapsed == 0 && op.chunks.isEmpty,"\(name) intact map remains stable")
+            // Every bridge drops into its river once a gap is blown through the deck.
+            for k in op.objectives.indices where op.objectives[k].span {
+                let o=op.objectives[k], deckY=Double(o.y0)*World.cell+World.top+2
+                for n in 0..<40 where !op.objectives[k].destroyed {
+                    op.explode(at:Vec(x:Double(o.x0+o.x1)/2*World.cell+Double(n%5-2)*20,y:deckY)); for _ in 0..<20 { op.update(1.0/60) }
+                }
+                for _ in 0..<900 { op.update(1.0/60) }
+                // End bays may stay resting on the banks; the span between them must be gone.
+                check(op.objectives[k].destroyed && op.spanCut(o),"\(name) \(o.name) is cut through and its span drops into the river")
+            }
+            // Troops can advance from the landing zone across every river to the last objective.
+            let march=World(), goal=Double(march.objectives.last!.x0)*World.cell
+            march.soldiers=[Soldier(id:1,position:Vec(x:300,y:march.troopGround(at:300)))]
+            march.move(goal+40)
+            for _ in 0..<Int(goal/TroopKind.rifleman.walkSpeed*60*1.5) where march.soldiers[0].position.x < goal { march.update(1.0/60) }
+            check(march.soldiers[0].position.x >= goal,"\(name) troops reach \(march.objectives.last!.name) from the landing zone")
+        }
+        World.select(0)
+        // Kamikaze drone: a cheap call-in that flies in from the edge, then follows the pointer.
+        let droneOffer=World.support[3]
+        check(droneOffer.kind == .drone && droneOffer.cost == 300,"a drone costs 300 credits")
+        func pilotedDrone(at x: Double) -> World {
+            let w=World(); w.credits=5_000; w.purchase(droneOffer,at:x)
+            for _ in 0..<900 where w.drone?.piloted != true { w.update(1.0/60) }
+            return w
+        }
+        let fly=World()
+        check(fly.purchase(droneOffer,at:1200) && fly.drone != nil && fly.credits == World.startingCredits-droneOffer.cost,"a drone is launched")
+        check(fly.drone!.heading == World.heading(toward:1200) && fly.drone!.position.x <= -World.edgeMargin,"the drone flies in from beyond the nearer edge")
+        check(fly.refusal(droneOffer) != nil && fly.refusal(World.support[1]) == nil,"a drone locks only drones")
+        check(!fly.detonateDrone() && fly.drone != nil,"a drone still off the map can't be set off")
+        for _ in 0..<900 where fly.drone?.piloted != true { fly.update(1.0/60) }
+        check(fly.drone?.piloted == true && abs(fly.drone!.position.x-1200) < 300,"the drone hands control over near its call-in point")
+        // Flown sideways it leans into the move, keeps under its top speed, then settles in a hover.
+        let hover=Vec(x:fly.drone!.position.x+300,y:fly.drone!.position.y+30)
+        fly.steerDrone(toward:hover)
+        var droneLean=0.0, fastest=0.0, overshoot=0.0
+        for _ in 0..<300 {
+            fly.update(1.0/60)
+            guard let d=fly.drone else { break }
+            droneLean=max(droneLean,d.tilt); fastest=max(fastest,hypot(d.velocity.x,d.velocity.y)); overshoot=max(overshoot,d.position.x-hover.x)
+        }
+        check(fly.drone != nil && droneLean > 0.4,"a drone leans into its move (\(droneLean))")
+        check(fastest < World.droneTopSpeed*1.15,"a drone keeps near its top speed (\(Int(fastest)) px/s)")
+        print("Drone hover: overshoot \(String(format:"%.1f",overshoot)) px, peak speed \(Int(fastest)) px/s")
+        let settled=fly.drone!
+        check(hypot(settled.position.x-hover.x,settled.position.y-hover.y) < 6 && hypot(settled.velocity.x,settled.velocity.y) < 15,"a piloted drone settles into a hover on the pointer")
+        check(abs(settled.tilt) < 0.05 && abs(settled.throttle-1/2.2) < 0.05,"a hovering drone levels out and holds itself up against gravity")
+        // The map's sides hold it in.
+        let rim=pilotedDrone(at:300); rim.steerDrone(toward:Vec(x:-800,y:rim.drone!.position.y))
+        for _ in 0..<300 { rim.update(1.0/60) }
+        check(rim.drone != nil && rim.drone!.position.x >= 0,"a drone can't be flown off the map")
+        // Flown into a building it detonates and blasts blocks.
+        let strike=pilotedDrone(at:1200), before=strike.destroyed
+        strike.steerDrone(toward:Vec(x:strike.drone!.position.x,y:World.bottom))
+        for _ in 0..<600 where strike.drone != nil { strike.update(1.0/60) }
+        check(strike.drone == nil && strike.destroyed > before && !strike.blasts.isEmpty,"a drone flown into the ground detonates and blasts blocks (\(strike.destroyed-before))")
+        for _ in 0..<Int(World.droneCooldownTime*60) { strike.update(1.0/60) }
+        check(strike.refusal(droneOffer) == nil,"another drone can be called once it is gone and the cooldown is over")
+        // Detonated by the player in the air.
+        let pop=pilotedDrone(at:1200), popped=pop.drone!.position
+        check(pop.detonateDrone() && pop.drone == nil && pop.blasts.contains{ hypot($0.position.x-popped.x,$0.position.y-popped.y) < 1 },"a piloted drone detonates on command")
+        // A flat battery cuts the motors; the drone falls and goes off where it lands.
+        let flat=pilotedDrone(at:1200)
+        flat.steerDrone(toward:flat.drone!.position)
+        var flown=0.0, cut=false
+        for _ in 0..<Int((World.droneBattery+15)*60) where flat.drone != nil {
+            flat.update(1.0/60); flown += 1.0/60
+            if let d=flat.drone, !d.powered { cut = cut || d.throttle == 0 }
+        }
+        check(cut && flat.drone == nil && flown > World.droneBattery,"a drone with a flat battery falls and detonates (\(String(format:"%.1f",flown)) s)")
+        // Flown into water a drone shorts out: no blast, and its wreck sinks to the bottom.
+        let dunk=pilotedDrone(at:1200)
+        dunk.steerDrone(toward:dunk.drone!.position)
+        for _ in 0..<150 { dunk.update(1.0/60) }
+        let over=dunk.drone!.position
+        let cx=Int(over.x/World.cell), cy=40
+        dunk.unit=1; dunk.fill(cx-40,0,81,cy+60,0); dunk.fill(cx-34,cy+56,69,4,2); dunk.fill(cx-34,cy+30,4,26,2); dunk.fill(cx+31,cy+30,4,26,2)
+        for y in cy+34..<cy+56 { for x in cx-30..<cx+31 { dunk.setWater(dunk.index(x,y),1) } }
+        dunk.structureDirty=false
+        let intact=dunk.destroyed
+        dunk.steerDrone(toward:Vec(x:over.x,y:Double(cy+50)*World.cell+World.top))
+        for _ in 0..<600 where dunk.drone != nil { dunk.update(1.0/60) }
+        check(dunk.drone == nil && dunk.wrecks.count == 1 && dunk.destroyed == intact && dunk.blasts.isEmpty,"a drone flown into water shorts out without exploding")
+        check(dunk.wrecks[0].shorted && !dunk.wrecks[0].powered && !dunk.detonateDrone(),"a shorted drone is dead and can't be set off")
+        for _ in 0..<600 { dunk.update(1.0/60) }
+        let floorY=Double(cy+56)*World.cell+World.top
+        check(dunk.droneInWater(dunk.wrecks[0].position) && floorY-dunk.wrecks[0].position.y < 12 && dunk.wrecks[0].resting > 1,"its wreck sinks and comes to rest on the bottom")
+        check(dunk.refusal(droneOffer) == nil,"another drone can be called once the cooldown is over")
+        // Cooldown and one at a time.
+        let lock=World(); lock.credits=5_000; lock.purchase(droneOffer,at:1200)
+        check(lock.refusal(droneOffer) != nil && !lock.purchase(droneOffer,at:1400),"only one drone flies at a time")
+        for _ in 0..<Int(World.droneCooldownTime*60)+10 { lock.update(1.0/60) }
+        check(lock.refusal(droneOffer) == "DRONE AIRBORNE","the cooldown alone doesn't free a second drone")
+        lock.detonateDrone(); check(lock.refusal(droneOffer) == nil,"a drone can be called again after the last one blows")
+        lock.purchase(droneOffer,at:1200); lock.reset(); check(lock.drone == nil && lock.droneCooldown == 0,"reset clears the drone and its cooldown")
+        let career=World()
+        check(career.unlocked(0) && !career.unlocked(1),"only the first operation is open at the start")
+        career.score=World.requirement; career.extract()
+        check(career.cleared == 1 && career.unlocked(1) && !career.unlocked(2),"extracting clears the operation and opens the next")
+        career.reset(); check(career.cleared == 1,"progress survives a new round")
+        career.devMode=true; check(specs.indices.allSatisfy{ career.unlocked($0) },"dev mode opens every operation")
+        World.select(2); career.devMode=false; career.reset(); career.score=World.requirement; career.extract()
+        check(career.cleared == 3,"clearing a later operation opens the one after it")
+        World.select(0)
+        // Water: every operation's lakes and rivers lie still until something disturbs them.
+        for level in specs.indices {
+            World.select(level)
+            let still=World(), before=still.water.mass, voxels=still.voxels
+            for _ in 0..<600 { still.update(1.0/60) }
+            var moved: Float=0
+            for i in before.indices where before[i] > 0 { moved += abs(before[i]-still.water.mass[i]) }
+            check(before.contains{ $0 > 0 } && moved < 1 && still.water.active.isEmpty && still.voxels == voxels,"\(specs[level].name) water lies still (\(String(format:"%.2f",moved)) moved)")
+        }
+        World.select(0)
+        // A stone tank of water on bedrock (which neither drinks water nor lets it through), with
+        // an empty basin beside it.
+        func tank() -> World {
+            let t=World()
+            t.voxels=[UInt8](repeating:0,count:World.columns*World.rows); t.backdrops=[Int](repeating:-1,count:World.columns*World.rows)
+            t.unit=1; t.fill(0,200,World.columns,World.rows-200,2); t.fill(400,160,4,40,2); t.fill(480,160,4,40,2); t.fill(640,150,4,50,2)
+            t.pools=[]; t.seedWater()
+            for y in 170..<200 { for x in 404..<480 { t.setWater(t.index(x,y),1) } }
+            t.structureDirty=false
+            for _ in 0..<120 { t.update(1.0/60) }
+            return t
+        }
+        func total(_ t: World) -> Float { t.water.mass.reduce(0,+)+t.water.drops.map{$0.mass}.reduce(0,+) }
+        let breach=tank(), held=total(breach)
+        breach.unit=1; breach.fill(480,160,4,40,0)
+        var outside: Float=0
+        for _ in 0..<120 { breach.update(1.0/60) }
+        for i in breach.water.mass.indices where i%World.columns > 484 && i%World.columns < 640 { outside += breach.water.mass[i] }
+        check(outside > held*0.2,"water floods out through a breached wall within two seconds (\(Int(outside)) of \(Int(held)) cells)")
+        for _ in 0..<1800 { breach.update(1.0/60) }
+        check(abs(total(breach)-held) < held*0.03,"flowing water is conserved (\(Int(total(breach))) of \(Int(held)))")
+        // Its surface across the tank and basin levels out, leaving at most a few ripples moving.
+        let levels=(406..<638).map{ x -> Float in
+            var y=199; var depth: Float=0
+            while y > 150 && breach.water.mass[breach.index(x,y)] > 0.002 { depth += min(1,breach.water.mass[breach.index(x,y)]); y -= 1 }
+            return depth
+        }
+        let spread=(levels.max() ?? 0)-(levels.min() ?? 0)
+        check(spread < 1 && breach.water.active.count < 1000,"spilled water levels out and settles (surface within \(String(format:"%.2f",spread)) cells, \(breach.water.active.count) still rippling)")
+        let surge=tank(), contained=total(surge)
+        surge.explode(at:Vec(x:442*World.cell,y:196*World.cell+World.top),radius:30)
+        check(surge.water.drops.count > 20,"a blast under water throws it into the air (\(surge.water.drops.count) drops)")
+        check(surge.water.drops.contains{ $0.velocity.y < -250 },"an underwater burst sends up a column")
+        for _ in 0..<900 { surge.update(1.0/60) }
+        check(surge.water.drops.isEmpty && abs(total(surge)-contained) < contained*0.03,"thrown water falls back into the grid (\(Int(total(surge))) of \(Int(contained)))")
+        // Dry soil drinks water that touches it, darkening, and the damp wicks on into the ground.
+        let soil=tank()
+        soil.unit=1; soil.fill(404,190,76,10,1)
+        for i in soil.water.mass.indices where soil.voxels[i] != 0 { soil.water.mass[i]=0; soil.water.next[i]=0 }
+        for x in 404..<480 { soil.wakeWater(soil.index(x,189)) }
+        let poured=total(soil)
+        for _ in 0..<600 { soil.update(1.0/60) }
+        let surface=soil.index(440,190), deeper=soil.index(440,193)
+        check(soil.water.soak[surface] > 0.9 && soil.water.wet[surface] >= 3,"soil under water soaks up and darkens")
+        check(soil.water.soak[deeper] > 0,"damp wicks down into the ground below")
+        check(total(soil) < poured-10,"soaking uses up water (\(Int(poured-total(soil))) cells drunk)")
+        // Rubble landing in water lifts it, and lets it seep through.
+        let sink=tank(), level=total(sink)
+        let spot=sink.index(442,199)
+        sink.voxels[spot]=10; sink.displaceWater(spot)
+        for _ in 0..<60 { sink.update(1.0/60) }
+        check(abs(total(sink)-level) < 1 && sink.water.mass[spot] <= World.rubblePorosity+0.01,"rubble displaces the water it lands in")
+        let plug=tank()
+        plug.unit=1; plug.fill(480,160,4,40,10)
+        for y in 160..<200 { for x in 480..<484 { plug.water.mass[plug.index(x,y)]=0; plug.water.next[plug.index(x,y)]=0 } }
+        for y in 170..<200 { plug.wakeWater(plug.index(479,y)) }
+        for _ in 0..<600 { plug.update(1.0/60) }
+        var seeped: Float=0
+        for i in plug.water.mass.indices where i%World.columns > 484 && i%World.columns < 640 { seeped += plug.water.mass[i] }
+        check(seeped > 5,"water seeps through a rubble pile (\(Int(seeped)) cells)")
+        // Water puts out fire and keeps soaked fuel from catching.
+        let douse=tank(), wetCell=douse.index(442,195)
+        douse.backdrops[wetCell]=douse.index(442,200)
+        douse.ignite(wetCell,1)
+        douse.stepFire(0.1)
+        check(douse.fire.flame[wetCell] == 0 && !douse.fire.burning.contains(wetCell),"water floods out a fire")
+        // Breaching the Stausee dam on Irongate Pass sends the reservoir down the valley.
+        World.select(2)
+        let dam=World()
+        dam.unit=S; dam.fill(756,40,30,50,0); dam.unit=1; dam.structureDirty=true
+        for _ in 0..<600 { dam.update(1.0/60) }
+        var valley: Float=0
+        for i in dam.water.mass.indices where i%World.columns > 790*S && i%World.columns < 840*S { valley += dam.water.mass[i] }
+        check(valley > 500,"a breached dam floods the valley below it (\(Int(valley)) cells)")
+        World.select(0)
         print("All structural physics checks passed. Peak scenario ended with \(stress.chunks.count) moving chunks.")
     }
 }

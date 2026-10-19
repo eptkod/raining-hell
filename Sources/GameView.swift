@@ -20,7 +20,7 @@ final class GameView: NSView {
     var escPage = EscPage.main
     /// Main pause menu rows. Sound and display live on the settings page; leaving asks first.
     let escOptions = [("RESUME","BACK TO THE FIELD"),("RESTART MAP","START THE OPERATION OVER"),
-                      ("SETTINGS","SOUND, VOLUME AND DISPLAY"),("EXIT","MAIN MENU OR QUIT GAME")]
+                      ("SETTINGS","SOUND, DISPLAY AND CONTROLS"),("EXIT","MAIN MENU OR QUIT GAME")]
     /// Pause menu hotkeys, in row order.
     let escKeys = ["[ESC]","[R]","[S]","[Q]"]
     /// The HVT list under the minimap starts collapsed to its header.
@@ -47,7 +47,11 @@ final class GameView: NSView {
     func deployTabRect(_ tab: RequisitionTab) -> NSRect { NSRect(x:tab == .troops ? 42 : 262,y:deployFrame.minY+28,width:216,height:24) }
     func deployRow(_ i:Int) -> NSRect { NSRect(x:42,y:deployFrame.minY+100+Double(i)*62,width:436,height:56) }
     let debriefOptions = [("MAIN MENU","ENTER · RETURN TO LEVEL SELECT"),("KEEP FIGHTING","ESC · RESUME FOR A HIGHER SCORE")]
-    let levels = [("TEST LEVEL","OPERATION ASHFALL · SIX-SECTOR FRONT")]
+    let levels = LevelSpec.all
+    /// When the current operation was started from the lobby, for its title card.
+    var briefingSince = -100.0
+    /// Operation unlocked by the extraction now being debriefed, if any.
+    var unlockedNow: Int?
     /// Credits the lobby will take out of the bank for the next operation, before the transfer loss.
     var withdrawal = 0
     static let withdrawalStep = 500
@@ -62,8 +66,16 @@ final class GameView: NSView {
     let cheatField = NSRect(x:76,y:806,width:150,height:22)
     /// Lobby settings: the pause menu's settings plus a danger zone for deleting saved data.
     var lobbySettings = false
-    enum SettingsTab { case general, danger }
+    /// Settings tabs. The pause menu shows GENERAL and CONTROLS; the lobby adds the danger zone.
+    enum SettingsTab { case general, controls, danger }
     var settingsTab = SettingsTab.general
+    var settingsTabs: [SettingsTab] { inMenu ? [.general,.controls,.danger] : [.general,.controls] }
+    /// Rebindable in-game keys, and the action on the CONTROLS tab waiting for its new key.
+    let binds = Keybinds.shared
+    var rebinding: KeyAction? { didSet { rebindNote = nil } }
+    var rebindNote: String?
+    /// The current key for `a`, as shown in hints.
+    func k(_ a: KeyAction) -> String { binds.label(a) }
     /// Irreversible lobby actions. Each asks the player to type a word before it runs.
     enum DangerAction: CaseIterable {
         case deleteSave, resetSettings
@@ -82,6 +94,9 @@ final class GameView: NSView {
         persistent = true
         world.bank = UserDefaults.standard.integer(forKey:"bank")
         world.onBankChange = { UserDefaults.standard.set($0,forKey:"bank") }
+        world.cleared = UserDefaults.standard.integer(forKey:"cleared")
+        world.onProgress = { UserDefaults.standard.set($0,forKey:"cleared") }
+        binds.load()
     }
     // Camera: the world point shown at the viewport centre (720,456) and its magnification.
     var camera = Vec(x:720,y:456)
@@ -89,6 +104,11 @@ final class GameView: NSView {
     let minZoom = 0.25, maxZoom = 3.0
     var panKeys = Set<UInt16>()
     var dragAnchor: Vec?
+    /// A left press on open ground: where it landed on screen and in the world. It fires on
+    /// release, unless the pointer moves `boxThreshold` px first, which turns it into a
+    /// selection box from `world` to the pointer.
+    var press: (screen:Vec,world:Vec,boxing:Bool)?
+    let boxThreshold = 6.0
     // Terrain is pre-rendered in 256 px tiles and redrawn only when a tile's cells change.
     let tileCells = 32*World.scale
     var tiles: [Int:(snapshot:[UInt8],image:CGImage)] = [:]
@@ -131,6 +151,8 @@ final class GameView: NSView {
             if !self.inMenu { self.world.advance(min(0.04,now-self.previous)) }
             if self.aimingRockets { self.world.faceRockets(toward:self.toWorld(self.pointer)) }
             if !self.inMenu && !self.escMenu { self.panWithKeys(min(0.04,now-self.previous)) }
+            if self.steeringDrone { self.world.steerDrone(toward:self.toWorld(self.pointer)) }
+            if !self.inMenu && !self.escMenu && !self.world.paused { self.followDrone(min(0.04,now-self.previous)) }
             self.previous = now
             self.needsDisplay = true
         }
@@ -170,7 +192,7 @@ final class GameView: NSView {
     enum Tac {
         static let panel: UInt32 = 0x101510, raised: UInt32 = 0x1a2219, hover: UInt32 = 0x263224
         static let rule: UInt32 = 0x3a4a34, dim: UInt32 = 0x6f8263, text: UInt32 = 0xc3d1ae, bright: UInt32 = 0xe4ecd2
-        static let green: UInt32 = 0x9fd88a, amber: UInt32 = 0xf0b04e, red: UInt32 = 0xe0644f
+        static let green: UInt32 = 0x9fd88a, amber: UInt32 = 0xf0b04e, red: UInt32 = 0xe0644f, cyan: UInt32 = 0x7cc8d8
     }
     /// Points always read the same way: grouped digits and a PTS suffix, so they never
     /// look like a counter of blocks, rounds, or time.
@@ -205,8 +227,9 @@ final class GameView: NSView {
         text(label,x+16,836,13,accent ? Tac.amber : Tac.bright,.bold,true)
         text(subtitle,x+16,858,9,accent ? 0xa98a52 : Tac.dim,.medium,true)
         if !key.isEmpty {
-            rect(x+width-30,835,18,16,0x000000,0.35); line([CGPoint(x:x+width-30,y:835),CGPoint(x:x+width-12,y:835),CGPoint(x:x+width-12,y:851),CGPoint(x:x+width-30,y:851),CGPoint(x:x+width-30,y:835)],accent ? 0x8a6d3a : Tac.rule)
-            text(key,x+width-24,836,10,accent ? Tac.amber : Tac.text,.bold,true)
+            let w = max(18,textWidth(key,10,.bold,true)+12), bx = x+width-12-w
+            rect(bx,835,w,16,0x000000,0.35); line([CGPoint(x:bx,y:835),CGPoint(x:bx+w,y:835),CGPoint(x:bx+w,y:851),CGPoint(x:bx,y:851),CGPoint(x:bx,y:835)],accent ? 0x8a6d3a : Tac.rule)
+            text(key,bx+w/2-textWidth(key,10,.bold,true)/2,836,10,accent ? Tac.amber : Tac.text,.bold,true)
         }
     }
     override func draw(_ dirtyRect: NSRect) {
@@ -216,7 +239,7 @@ final class GameView: NSView {
         ctx.setShouldAntialias(false)
         drawBattlefield(ctx)
         ctx.setShouldAntialias(true)
-        if inMenu { drawMenu() } else { drawHUD() }
+        if inMenu { drawMenu() } else { drawSelectionBox(); drawHUD() }
         if debrief { drawDebrief() }
         if escMenu { drawEscMenu() }
         ctx.restoreGState()
@@ -237,15 +260,35 @@ final class GameView: NSView {
         camera = Vec(x:anchor.x-(screen.x-720)/zoom,y:anchor.y-(screen.y-456)/zoom)
         clampCamera()
     }
-    func resetCamera() { camera = Vec(x:720,y:456); zoom = 1; clampCamera() }
+    /// Frames the landing zone; deeper-lying maps start the view lower to keep it in shot.
+    func resetCamera() { camera = Vec(x:720,y:456+Double(World.spec.lift)*World.cell*Double(World.scale)); zoom = 1; clampCamera() }
     func panWithKeys(_ dt: Double) {
         guard !panKeys.isEmpty else { return }
         let speed = 900*dt/zoom
-        if panKeys.contains(123) { camera.x -= speed }
-        if panKeys.contains(124) { camera.x += speed }
-        if panKeys.contains(126) { camera.y -= speed }
-        if panKeys.contains(125) { camera.y += speed }
+        if panKeys.contains(binds.key(.panLeft)) { camera.x -= speed }
+        if panKeys.contains(binds.key(.panRight)) { camera.x += speed }
+        if panKeys.contains(binds.key(.panUp)) { camera.y -= speed }
+        if panKeys.contains(binds.key(.panDown)) { camera.y += speed }
         clampCamera()
+    }
+    /// Keeps a flying drone in frame. The camera only moves once the drone leaves the middle
+    /// of the view, so inside that box the pointer is a fixed point on the map the drone flies
+    /// to; holding the pointer near the edge of the view keeps it flying that way.
+    func followDrone(_ dt: Double) {
+        guard let d = world.drone else { return }
+        let s = toScreen(d.position), box = NSRect(x:420,y:286,width:600,height:340)
+        let sx = s.x < box.minX ? s.x-box.minX : s.x > box.maxX ? s.x-box.maxX : 0
+        let sy = s.y < box.minY ? s.y-box.minY : s.y > box.maxY ? s.y-box.maxY : 0
+        guard sx != 0 || sy != 0 else { return }
+        let ease = min(1,dt*8)
+        camera = Vec(x:camera.x+sx/zoom*ease,y:camera.y+sy/zoom*ease)
+        clampCamera()
+    }
+    /// Whether the pointer is flying the drone: one is under control and the pointer is over
+    /// the battlefield with no menu or placement in the way.
+    var steeringDrone: Bool {
+        world.drone?.piloted == true && isHovering && !inMenu && !escMenu && !debrief && !deployMenu && placing == nil
+            && pointer.y > 104 && pointer.y < 808 && !minimapFrame.contains(NSPoint(x:pointer.x,y:pointer.y))
     }
     func focusSelection() {
         let units = world.soldiers.filter{$0.selected}.isEmpty ? world.soldiers : world.soldiers.filter{$0.selected}
@@ -253,29 +296,69 @@ final class GameView: NSView {
         camera = Vec(x:units.map{$0.position.x}.reduce(0,+)/Double(units.count),y:units.map{$0.position.y}.reduce(0,+)/Double(units.count)-40)
         clampCamera()
     }
+    /// Each operation's sky and distant country, so a front is recognisable from its first frame.
+    struct Backdrop {
+        var sky: (UInt32,UInt32), cloud: UInt32, moon: Double
+        var far: UInt32, near: UInt32, tree: UInt32
+        /// Pine crowns, if a shade apart from the trunks.
+        var leaf: UInt32? = nil
+        /// Height of the far hills relative to the first front's.
+        var peaks = 1.0
+        /// Distant rooftops and chimneys (`stacks`) behind the near hills instead of trees.
+        var roofs = false, stacks = false
+        /// Fires glowing low on the horizon, if any.
+        var glow: UInt32? = nil
+    }
+    static let backdrops = [
+        // Kessel Crossing: rain over teal hills.
+        Backdrop(sky:(0x172a35,0x5c7372),cloud:0x899b98,moon:1,far:0x344d55,near:0x2b444a,tree:0x233b3f,leaf:0x263e42),
+        // Marrow Ferry: grey dawn breaking pink over the estuary.
+        Backdrop(sky:(0x2a2d3f,0x9c7f7d),cloud:0xc9a9a0,moon:0.4,far:0x4a4b5c,near:0x3a3c4b,tree:0x2e3140),
+        // Irongate Pass: cold, clear air under high snow peaks.
+        Backdrop(sky:(0x0f1d33,0x7d98ad),cloud:0xd6e2ea,moon:1.4,far:0x5d7286,near:0x32424f,tree:0x24323c,peaks:2.1),
+        // Vestra Works: smog-brown dusk and a skyline of chimneys.
+        Backdrop(sky:(0x2b2117,0xa7703c),cloud:0x7d6a52,moon:0.25,far:0x4d3d2c,near:0x3a2f24,tree:0x2c241c,stacks:true,glow:0xd8792e),
+        // Saint Odile: deep night over the city's rooftops.
+        Backdrop(sky:(0x070b1a,0x26355a),cloud:0x46547a,moon:1.8,far:0x18213a,near:0x121a2e,tree:0x0e1526,roofs:true),
+        // The Citadel: the capital burning under a red sky.
+        Backdrop(sky:(0x1a0909,0x8a2f1c),cloud:0x6e3a2c,moon:0.3,far:0x3a1c18,near:0x2a1512,tree:0x1f100e,peaks:0.7,roofs:true,stacks:true,glow:0xff6a2a)]
     func drawBackground() {
-        let gradient = NSGradient(starting:color(0x172a35),ending:color(0x5c7372))!
+        let b = Self.backdrops[min(World.level,Self.backdrops.count-1)]
+        let gradient = NSGradient(starting:color(b.sky.0),ending:color(b.sky.1))!
         gradient.draw(in:NSRect(x:0,y:104,width:1440,height:704),angle:90)
-        // Distant layers drift slower than the battlefield for depth.
-        let horizon = toScreen(Vec(x:0,y:552)).y
+        // Distant layers drift slower than the battlefield for depth; the horizon sits at
+        // the same height above the ground on every front.
+        let horizon = toScreen(Vec(x:0,y:552+Double(World.spec.lift)*World.cell*Double(World.scale))).y
         let lift = (horizon-552)*0.5
         let drift = camera.x*zoom
-        circle(1090-drift*0.01,216+lift*0.3,57,0xadc1b8,0.17); circle(1090-drift*0.01,216+lift*0.3,40,0xbcd0c5,0.14)
+        circle(1090-drift*0.01,216+lift*0.3,57,0xadc1b8,0.17*b.moon); circle(1090-drift*0.01,216+lift*0.3,40,0xbcd0c5,0.14*b.moon)
         // Sparse distant light and long banks of low cloud.
         for n in 0..<14 {
             let x = (Double((n*197)%1510)-drift*0.04).truncatingRemainder(dividingBy:1510)
             let y = 155+Double((n*41)%185)+lift*0.4
             for wrap in [x < 0 ? x+1510 : x, (x < 0 ? x+1510 : x)-1510] {
-                rect(wrap-70,y,140+Double(n%4)*44,5,0x899b98,0.065)
-                rect(wrap-40,y+6,210,2,0x899b98,0.04)
+                rect(wrap-70,y,140+Double(n%4)*44,5,b.cloud,0.065)
+                rect(wrap-40,y+6,210,2,b.cloud,0.04)
             }
         }
-        let far: [(Double,Double)] = [(0,444),(100,350),(165,380),(320,257),(466,386),(555,340),(720,451),(848,332),(953,396),(1120,294),(1320,435),(1440,444)]
+        if let glow = b.glow {
+            NSGradient(starting:color(glow,0),ending:color(glow,0.3))!.draw(in:NSRect(x:0,y:300+lift,width:1440,height:200),angle:90)
+        }
+        let far: [(Double,Double)] = [(0,444),(100,350),(165,380),(320,257),(466,386),(555,340),(720,451),(848,332),(953,396),(1120,294),(1320,435),(1440,444)].map{ ($0.0,451-(451-$0.1)*b.peaks) }
         let near: [(Double,Double)] = [(0,484),(130,419),(266,462),(450,399),(620,487),(800,436),(1010,477),(1250,390),(1440,484)]
-        for (ridge,shade,rate) in [(far,UInt32(0x344d55),0.08),(near,UInt32(0x2b444a),0.16)] {
+        for (ridge,shade,rate) in [(far,b.far,0.08),(near,b.near,0.16)] {
             let shift = -(drift*rate).truncatingRemainder(dividingBy:1440)
             for tile in [shift-1440,shift,shift+1440] where tile < 1440 && tile > -1440 {
                 polygon(ridge.map{CGPoint(x:$0.0+tile,y:$0.1+lift)}+[CGPoint(x:1440+tile,y:2000),CGPoint(x:tile,y:2000)],shade)
+            }
+            // Snow on the high peaks.
+            if b.peaks > 1.5 && rate < 0.1 {
+                for tile in [shift-1440,shift,shift+1440] where tile < 1440 && tile > -1440 {
+                    for k in 1..<ridge.count-1 where ridge[k].1 < ridge[k-1].1 && ridge[k].1 < ridge[k+1].1 && ridge[k].1 < 260 {
+                        let (x,y) = (ridge[k].0+tile,ridge[k].1+lift)
+                        polygon([CGPoint(x:x,y:y),CGPoint(x:x+(ridge[k+1].0-ridge[k].0)*0.22,y:y+34),CGPoint(x:x-(ridge[k].0-ridge[k-1].0)*0.22,y:y+34)],0xe4edf2,0.75)
+                    }
+                }
             }
         }
         let treeShift = -(drift*0.16).truncatingRemainder(dividingBy:1440)
@@ -283,8 +366,17 @@ final class GameView: NSView {
             var x = Double((n*89)%1440)+treeShift
             if x < -30 { x += 1440 }
             let y = 476+Double((n*7)%31)+lift, h = 32+Double(n%7)*8
-            rect(x,y-h,3,h,0x233b3f)
-            polygon([CGPoint(x:x-13,y:y-12),CGPoint(x:x+1,y:y-h),CGPoint(x:x+16,y:y-12)],0x263e42)
+            if b.roofs || b.stacks {
+                // Town silhouettes: blocks with the odd lit window, and works chimneys.
+                if b.stacks && n%6 == 0 { rect(x+4,y-h*2.2,7,h*2.2,b.tree); continue }
+                guard b.roofs else { continue }
+                let w = 26+Double(n%5)*9
+                rect(x-w/2,y-h,w,h+40,b.tree)
+                if n%3 == 0 { rect(x-w/2+6,y-h+8,3,3,0xf2c46a,0.5) }
+            } else {
+                rect(x,y-h,3,h,b.tree)
+                polygon([CGPoint(x:x-13,y:y-12),CGPoint(x:x+1,y:y-h),CGPoint(x:x+16,y:y-12)],b.leaf ?? b.tree)
+            }
         }
     }
     // Prototype UI & graphics are subject to change.
@@ -301,6 +393,8 @@ final class GameView: NSView {
         func solid(_ x: Int,_ y: Int) -> Bool { let m = material(x,y); return m != 0 && m != 4 && !World.isBar(m) }
         // Fire soot darkens standing cells and rooms; falling sections keep their own look.
         let soot = piece == nil ? world.fire.char : []
+        // Damp ground, rubble and walls go darker where water has touched them.
+        let wet = piece == nil ? world.water.wet : []
         // Interiors: each room gets its own wallpaper, wainscot, ceiling lamps, and
         // furniture, all painted on the destructible rear panel.
         let papers: [(UInt32,UInt32)] = [(0x26332f,0x2b3934),(0x352d24,0x3c332a),(0x27303a,0x2c3641),(0x36292b,0x3d2f31),(0x2c302e,0x323735)]
@@ -473,6 +567,11 @@ final class GameView: NSView {
                 if m == 6 && x%(3*u) == 0 { rect(px,py,1,c,0x474c41) }
                 if m <= 2 && hash == 3 { rect(px+2*q,py+3*q,max(1,3*q),max(1,2*q),0x161e23,0.45) }
                 if !soot.isEmpty && soot[i] > 0 { rect(px,py,c,c,0x0e0b09,Self.sootShade[Int(min(3,soot[i]))]) }
+                if !wet.isEmpty && wet[i] > 0 {
+                    rect(px,py,c,c,0x0b171c,Self.wetShade[Int(min(4,wet[i]))])
+                    // A wet surface open to the sky catches a faint sheen.
+                    if wet[i] >= 3 && material(x,y-1) == 0 { rect(px,py,c,max(1,q),0xa8c8c6,0.22) }
+                }
             }
         }
     }
@@ -521,9 +620,9 @@ final class GameView: NSView {
         for y in y0..<min(World.rows,y0+tileCells) {
             for x in x0..<min(World.columns,x0+tileCells) { snapshot.append(world.backdrops[world.index(x,y)] >= 0 ? 1 : 0) }
         }
-        let soot = world.fire.char
+        let soot = world.fire.char, wet = world.water.wet
         for y in y0..<min(World.rows,y0+tileCells) {
-            for x in x0..<min(World.columns,x0+tileCells) { snapshot.append(soot[world.index(x,y)]) }
+            for x in x0..<min(World.columns,x0+tileCells) { snapshot.append(soot[world.index(x,y)]); snapshot.append(wet[world.index(x,y)]) }
         }
         let key = ty*1000+tx
         if let cached = tiles[key], cached.snapshot == snapshot { return cached.image }
@@ -561,17 +660,6 @@ final class GameView: NSView {
                 ctx.restoreGState()
             }
         }
-        // Standing water in the gorge and flooded caverns.
-        let c = World.cell
-        for pool in world.pools where Double(pool.x1)*c > view.minX && Double(pool.x0)*c < view.maxX {
-            for x in pool.x0...pool.x1 where world.material(x,pool.row) == 0 {
-                var depth = 0
-                while pool.row+depth < World.rows && world.material(x,pool.row+depth) == 0 { depth += 1 }
-                let px = Double(x)*c, py = Double(pool.row)*c+World.top
-                rect(px,py,c,Double(depth)*c,0x2c5560,0.62)
-                rect(px,py,c,2,0x9fc4c0,0.35+0.15*sin(world.elapsed*2+Double(x/World.scale)*0.7))
-            }
-        }
         // Landing zone flag and path lights.
         let flagGround = world.ground(at:94)
         rect(93,flagGround-68,3,68,0x92a499)
@@ -601,10 +689,14 @@ final class GameView: NSView {
             }
             ctx.restoreGState()
         }
+        for w in world.wrecks where margin.contains(NSPoint(x:w.position.x,y:w.position.y)) { drawDrone(w) }
+        // Water goes over falling sections and dead drones, so what lands in it is seen sinking through.
+        drawWater(ctx,view)
         if (deployMenu && deployTab == .troops) || placingTroops { drawDeployZone(view) }
         for crate in world.crates where margin.insetBy(dx:-World.crateRadius,dy:-World.crateRadius).contains(NSPoint(x:crate.position.x,y:crate.position.y)) { drawCrate(crate) }
         for plane in world.planes where margin.insetBy(dx:-120,dy:-60).contains(NSPoint(x:plane.x,y:plane.y)) { drawPlane(plane) }
         for jet in world.jets where margin.insetBy(dx:-80,dy:-60).contains(NSPoint(x:jet.x,y:jet.path.y)) { drawJet(jet) }
+        if let d = world.drone, margin.contains(NSPoint(x:d.position.x,y:d.position.y)) { drawDroneAim(d); drawDrone(d) }
         drawFireLayer(view)
         drawTrajectories(view)
         for s in world.soldiers where margin.contains(NSPoint(x:s.position.x,y:s.position.y)) { drawSoldier(s) }
@@ -621,6 +713,10 @@ final class GameView: NSView {
         }
         for p in world.particles where margin.contains(NSPoint(x:p.position.x,y:p.position.y)) {
             let alpha = min(1,p.life / max(0.1,p.total)*1.5)
+            if p.kind == World.sprayKind || p.kind == World.mistKind {
+                rect(p.position.x-p.size/2,p.position.y-p.size/2,p.size,p.size,p.kind == World.sprayKind ? 0xd9eeee : 0xe4efee,p.kind == World.sprayKind ? alpha*0.85 : alpha*0.22)
+                continue
+            }
             rect(p.position.x-p.size/2,p.position.y-p.size/2,p.size,p.size,p.kind == 14 ? 0x2a2522 : palette[min(p.kind,9)],p.kind == 9 ? alpha*0.32 : p.kind == 14 ? alpha*0.42 : alpha)
         }
         for b in world.blasts {
@@ -663,16 +759,16 @@ final class GameView: NSView {
         brackets(NSRect(x:12,y:114,width:1416,height:656),Tac.text,22,0.55,2)
         // Depth fade into the command dock.
         NSGradient(starting:color(Tac.panel,0),ending:color(Tac.panel,0.85))!.draw(in:NSRect(x:0,y:718,width:1440,height:90),angle:90)
-        if !inMenu { drawMinimap(ctx); drawObjectives(); drawStatusToast() }
+        if !inMenu { drawMinimap(ctx); drawObjectives(); drawStatusToast(); drawBriefing() }
         if help && !inMenu { drawHelp() }
         if deployMenu && !inMenu { drawDeployMenu() }
         if world.paused && !escMenu && !debrief {
-            rect(0,104,1440,704,0x050805,0.5)
-            let r = NSRect(x:500,y:360,width:440,height:96)
-            panel(r,Tac.panel,0.92); brackets(r.insetBy(dx:-6,dy:-6),Tac.amber,12)
-            rect(r.minX,r.minY,440,4,Tac.amber)
-            text("■ SIMULATION HOLD",r.minX+28,r.minY+22,26,Tac.bright,.heavy,true)
-            text("ALL UNITS FROZEN · PRESS SPACE TO RESUME",r.minX+30,r.minY+64,10,Tac.amber,.medium,true)
+            // A thin amber frame and a small tag, so the field stays clear for planning orders.
+            brackets(NSRect(x:6,y:108,width:1428,height:668),Tac.amber,30,0.8,2)
+            let tag = "■ PAUSED · ISSUE ORDERS · \(k(.pause)) RESUME"
+            let w = textWidth(tag,9,.bold,true)+20, r = NSRect(x:720-w/2,y:112,width:w,height:20)
+            panel(r,Tac.panel,0.85); rect(r.minX,r.minY,r.width,2,Tac.amber)
+            text(tag,r.minX+10,r.minY+5,9,Tac.amber,.bold,true)
         }
     }
     /// A world-anchored range grid with edge ticks, drawn in screen space so lines stay crisp.
@@ -703,7 +799,7 @@ final class GameView: NSView {
             var pixels = [UInt32](repeating:0,count:World.columns*World.rows)
             for i in pixels.indices {
                 let v = world.voxels[i]
-                let hex: UInt32 = v != 0 ? palette[Int(v)] : (world.backdrops[i] >= 0 ? 0x15272c : 0)
+                let hex: UInt32 = v != 0 ? palette[Int(v)] : world.water.mass[i] > 0.3 ? 0x3b7480 : (world.backdrops[i] >= 0 ? 0x15272c : 0)
                 if v != 0 || hex != 0 { pixels[i] = 0xff000000 | (hex & 0xff) << 16 | (hex >> 8 & 0xff) << 8 | hex >> 16 }
             }
             let data = Data(bytes:pixels,count:pixels.count*4) as CFData
@@ -731,6 +827,10 @@ final class GameView: NSView {
         for jet in world.jets where jet.x > 0 && jet.x < World.width {
             let px = left+jet.x*sx, py = top+max(0,jet.path.y-World.top)*sy, h = jet.heading
             polygon([CGPoint(x:px+4*h,y:py),CGPoint(x:px-3*h,y:py-2),CGPoint(x:px-3*h,y:py+2)],Tac.red)
+        }
+        if let d = world.drone, d.position.x > 0 && d.position.x < World.width {
+            let px = left+d.position.x*sx, py = top+max(0,d.position.y-World.top)*sy
+            rect(px-2,py-2,4,4,Tac.red); brackets(NSRect(x:px-4,y:py-4,width:8,height:8),Tac.red,2,0.9,1)
         }
         drawFireMinimap(left:left,top:top,sx:sx,sy:sy)
         for s in world.soldiers { rect(left+s.position.x*sx-1,top+(s.position.y-World.top)*sy-3,2,3,s.outOfAmmo ? Tac.red : s.lowAmmo ? Tac.amber : s.selected ? Tac.green : Tac.bright) }
@@ -860,7 +960,7 @@ final class GameView: NSView {
         panel(r,Tac.panel,0.94); rect(r.minX,r.minY,r.width-10,22,Tac.amber,0.14); rect(r.minX,r.minY,3,r.height,Tac.amber)
         text("▲ FIELD GUIDE",r.minX+14,r.minY+4,11,Tac.amber,.bold,true)
         text("Destroy infrastructure to score.",r.minX+14,r.minY+32,13,Tac.bright,.semibold)
-        let steps = ["[E] Spend credits on troops.","Click structures to open fire.","HVTs pay triple, plus a bonus.","Reach \(World.requirement/1000)K PTS, then press X."]
+        let steps = ["[\(k(.troops))] Spend credits on troops.","Click structures to open fire.","HVTs pay triple, plus a bonus.","Reach \(World.requirement/1000)K PTS, then press \(k(.extract))."]
         for (i,step) in steps.enumerated() {
             let y = r.minY+60+Double(i)*24
             rect(r.minX+14,y,22,17,Tac.amber,0.15)
@@ -870,19 +970,23 @@ final class GameView: NSView {
         let cy = r.minY+168
         rect(r.minX+14,cy,r.width-28,1,Tac.rule)
         text("CONTROLS",r.minX+14,cy+8,9,Tac.dim,.bold,true)
-        let controls = [("CLICK","Attack / select · fire RPG"),("SHIFT-CLICK","Add / remove a soldier"),("RIGHT-CLICK","Move selected soldiers"),
-                        ("A  ·  ESC","Select all / none  ·  deselect"),("SCROLL / PINCH","Zoom"),("ARROWS / 2-FINGER","Pan  ·  C centres on troops"),
-                        ("SPACE  ·  T","Pause  ·  change speed"),("ESC","Menu: settings, restart, exit")]
+        let pan = [KeyAction.panLeft,.panRight,.panUp,.panDown].allSatisfy{ binds.key($0) == $0.defaultKey } ? "ARROWS" : [KeyAction.panLeft,.panRight,.panUp,.panDown].map{k($0)}.joined(separator:"/")
+        let controls = [("CLICK","Attack / select · fire RPG"),("SHIFT-CLICK · DRAG","Add / remove · box-select"),("RIGHT-CLICK","Move selected soldiers"),
+                        ("\(k(.selectAll))  ·  ESC","Select all / none  ·  deselect"),("SCROLL / PINCH","Zoom"),("\(pan) / 2-FINGER","Pan  ·  \(k(.centre)) centres on troops"),
+                        ("\(k(.pause))  ·  \(k(.speed))","Pause  ·  change speed"),("ESC","Menu: settings, restart, exit")]
         for (i,c) in controls.enumerated() {
             let y = cy+28+Double(i)*22
             text(c.0,r.minX+14,y+1,9,Tac.amber,.bold,true)
             text(c.1,r.minX+150,y,11,Tac.text)
         }
-        text("CLICK OR PRESS TAB / F1 TO CLOSE OR REOPEN",r.minX+14,r.maxY-22,9,Tac.dim,.medium,true)
+        text("CLICK OR PRESS \(k(.guide) == "F1" ? "F1" : k(.guide)+" / F1") TO CLOSE OR REOPEN",r.minX+14,r.maxY-22,9,Tac.dim,.medium,true)
     }
     let clock: DateFormatter = { let f = DateFormatter(); f.dateFormat = "HH:mm:ss'Z'"; f.timeZone = TimeZone(identifier:"UTC"); return f }()
-    let levelGrids = ["48°12′N  016°22′E"]
-    func levelCard(_ i:Int) -> NSRect { NSRect(x:96,y:292+Double(i)*140,width:584,height:124) }
+    func levelCard(_ i:Int) -> NSRect { NSRect(x:96,y:282+Double(i)*46,width:584,height:40) }
+    /// The operation Enter starts and the radar shows when no card is hovered: the first one
+    /// not yet cleared.
+    var nextLevel: Int { min(levels.count-1,world.cleared) }
+    var hoveredLevel: Int? { isHovering ? levels.indices.first { levelCard($0).contains(NSPoint(x:pointer.x,y:pointer.y)) } : nil }
     func drawMenu() {
         let t = ProcessInfo.processInfo.systemUptime
         let blink = Int(t*2) % 2 == 0
@@ -901,29 +1005,33 @@ final class GameView: NSView {
         text("TACTICAL DESTRUCTION SIMULATOR",98,112,11,Tac.amber,.bold,true)
         rect(96,134,5,64,Tac.amber)
         text("RAINING HELL",120,128,56,Tac.bright,.heavy,true)
-        text("v0.3.0 RC1  //  ALPHA BUILD  //  AO ASHFALL",122,208,10,Tac.dim,.medium,true)
+        text("v0.3.0 RC1  //  ALPHA BUILD  //  \(levels.count) OPERATIONS",122,208,10,Tac.dim,.medium,true)
         rect(96,244,584,1,Tac.rule)
         text("▸ SELECT OPERATION",96,258,11,Tac.amber,.bold,true)
-        text(String(format:"%02d AVAILABLE",levels.count),590,258,10,Tac.dim,.medium,true)
+        let open = levels.indices.filter { world.unlocked($0) }.count
+        text(String(format:"%02d / %02d AVAILABLE",open,levels.count),560,258,10,Tac.dim,.medium,true)
         for (i,level) in levels.enumerated() {
-            let r = levelCard(i)
-            let hovered = isHovering && r.contains(NSPoint(x:pointer.x,y:pointer.y))
-            let accent = hovered ? Tac.green : Tac.amber
-            panel(r,hovered ? Tac.hover : Tac.raised,0.94,hovered ? Tac.green : Tac.rule,14)
+            let r = levelCard(i), open = world.unlocked(i), done = i < world.cleared
+            let hovered = open && hoveredLevel == i
+            let accent = !open ? Tac.rule : hovered ? Tac.green : Tac.amber
+            panel(r,hovered ? Tac.hover : Tac.raised,open ? 0.94 : 0.6,hovered ? Tac.green : Tac.rule,10)
             rect(r.minX,r.minY,4,r.height,accent)
-            brackets(r.insetBy(dx:-7,dy:-7),accent,12,hovered ? 1 : 0.35)
-            text(String(format:"OP-%02d",i+1),r.minX+22,r.minY+14,10,accent,.heavy,true)
-            text("GRID  \(levelGrids[min(i,levelGrids.count-1)])",r.maxX-186,r.minY+14,9,Tac.dim,.medium,true)
-            text(level.0,r.minX+22,r.minY+32,26,Tac.bright,.heavy,true)
-            text(level.1,r.minX+22,r.minY+68,10,Tac.text,.medium,true)
-            rect(r.minX+22,r.minY+88,r.width-44,1,Tac.rule,0.6)
-            text("THREAT",r.minX+22,r.minY+98,9,Tac.dim,.bold,true)
-            for b in 0..<5 { rect(r.minX+70+Double(b)*9,r.minY+99,6,10,b < 2 ? Tac.amber : Tac.rule,b < 2 ? 1 : 0.8) }
-            text("STATUS",r.minX+142,r.minY+98,9,Tac.dim,.bold,true)
-            circle(r.minX+192,r.minY+104,2.5,Tac.green)
-            text("READY",r.minX+200,r.minY+98,9,Tac.green,.bold,true)
-            if hovered { text(blink ? "DEPLOY ▸" : "DEPLOY ▹",r.maxX-96,r.minY+97,11,Tac.green,.heavy,true) }
-            else { text("[\(i+1)]",r.maxX-48,r.minY+97,11,Tac.text,.bold,true) }
+            if hovered { brackets(r.insetBy(dx:-5,dy:-5),accent,10,1) }
+            text(String(format:"OP-%02d  ·  ",i+1)+level.operation,r.minX+16,r.minY+6,9,accent,.heavy,true)
+            text(level.name,r.minX+16,r.minY+17,15,open ? Tac.bright : Tac.dim,.heavy,true)
+            // Size, goal and opening funds, so the player can pick with open eyes.
+            let stats = [("FRONT",String(format:"%.1f KM",Double(level.columns)*World.cell*Double(World.scale)/1000)),
+                         ("GOAL","\(level.requirement/1000)K PTS"),("GRANT · \(level.funds.name)",cr(level.grant))]
+            for (k,stat) in stats.enumerated() {
+                let x = r.minX+262+Double(k)*82
+                text(stat.0,x,r.minY+7,8,Tac.dim,.bold,true)
+                text(stat.1,x,r.minY+20,11,open ? Tac.text : Tac.dim,.semibold,true)
+            }
+            let state = done ? "CLEARED" : open ? "READY" : "LOCKED"
+            text(state,r.maxX-62,r.minY+20,9,done || open ? Tac.green : Tac.dim,.bold,true)
+            if hovered { text(blink ? "DEPLOY ▸" : "DEPLOY ▹",r.maxX-62,r.minY+6,9,Tac.green,.heavy,true) }
+            else if open { text("[\(i+1)]",r.maxX-62,r.minY+6,9,Tac.text,.bold,true) }
+            else { text("CLEAR OP-\(String(format:"%02d",i))",r.maxX-62,r.minY+6,7,Tac.dim,.bold,true) }
         }
         drawRadar(t)
         rect(48,840,1344,1,Tac.rule,0.7)
@@ -955,15 +1063,18 @@ final class GameView: NSView {
         polygon(pts,c)
         circle(cx,cy,r*0.34,hole)
     }
-    func settingsTabRect(_ tab: SettingsTab) -> NSRect { NSRect(x:tab == .general ? 524 : 722,y:250,width:194,height:24) }
+    func settingsTabRect(_ tab: SettingsTab) -> NSRect {
+        let tabs = settingsTabs, w = (392-4*Double(tabs.count-1))/Double(tabs.count)
+        return NSRect(x:524+Double(tabs.firstIndex(of:tab) ?? 0)*(w+4),y:250,width:w,height:24)
+    }
     /// Danger zone rows sit in one red-bordered box, GitHub style: description left, button right.
     let dangerBox = NSRect(x:524,y:318,width:392,height:156)
     func dangerRow(_ a: DangerAction) -> NSRect { NSRect(x:dangerBox.minX,y:dangerBox.minY+(a == .deleteSave ? 0 : 78),width:dangerBox.width,height:78) }
     func dangerButton(_ a: DangerAction) -> NSRect { let r = dangerRow(a); return NSRect(x:r.maxX-136,y:r.midY-17,width:120,height:34) }
     func dangerDetail(_ a: DangerAction) -> (String,String) {
         switch a {
-        case .deleteSave: return (world.bank > 0 ? "ERASES \(cr(world.bank)) BANKED CREDITS." : "ERASES BANKED CREDITS.","ONCE DELETED, IT CANNOT BE RECOVERED.")
-        case .resetSettings: return ("SOUND BACK ON AT \(Int(GameAudio.defaultVolume*100))% VOLUME.","YOUR SAVE DATA IS KEPT.")
+        case .deleteSave: return (world.bank > 0 ? "ERASES \(cr(world.bank)) BANKED CREDITS AND CLEARED OPERATIONS." : "ERASES BANKED CREDITS AND CLEARED OPERATIONS.","ONCE DELETED, IT CANNOT BE RECOVERED.")
+        case .resetSettings: return ("SOUND ON AT \(Int(GameAudio.defaultVolume*100))% VOLUME, DEFAULT KEYS.","YOUR SAVE DATA IS KEPT.")
         }
     }
     func drawLobbySettings() {
@@ -977,19 +1088,76 @@ final class GameView: NSView {
         text("COMMAND TERMINAL",800,167,10,0x1a1408,.heavy,true)
         rect(524,212,5,30,Tac.amber)
         text("SETTINGS",540,206,26,Tac.bright,.heavy,true)
-        for tab in [SettingsTab.general,.danger] {
+        drawSettingsTabs()
+        rect(524,280,392,1,Tac.rule)
+        switch settingsTab {
+        case .general: drawSettingRows("RETURN TO THE MAIN MENU")
+        case .controls: drawControls()
+        case .danger: drawDangerZone()
+        }
+        rect(524,580,392,1,Tac.rule,0.6)
+        if settingsTab == .controls { drawControlsFooter() }
+        else { text(settingsTab == .danger ? "THESE ACTIONS CANNOT BE UNDONE   //   [TAB] GENERAL" : "SETTINGS ARE SAVED AUTOMATICALLY   //   [TAB] CONTROLS",526,594,9,Tac.dim,.medium,true) }
+        if let confirming { drawDangerConfirm(confirming) }
+    }
+    /// The tab strip under the settings title, shared by the lobby and the pause menu.
+    func drawSettingsTabs() {
+        for tab in settingsTabs {
             let r = settingsTabRect(tab), on = settingsTab == tab, hovered = confirming == nil && escHovered(r)
             let accent = tab == .danger ? Tac.red : Tac.green
             rect(r.minX,r.minY,r.width,r.height,on ? Tac.raised : hovered ? Tac.hover : 0x000000,on || hovered ? 1 : 0.3)
             if on { rect(r.minX,r.maxY-2,r.width,2,accent) }
-            let label = tab == .general ? "GENERAL" : "⚠ DANGER ZONE"
+            let label = tab == .general ? "GENERAL" : tab == .controls ? "CONTROLS" : "⚠ DANGER ZONE"
             text(label,r.midX-textWidth(label,10,.heavy,true)/2,r.minY+6,10,on ? (tab == .danger ? Tac.red : Tac.bright) : hovered ? accent : Tac.dim,.heavy,true)
         }
-        rect(524,280,392,1,Tac.rule)
-        if settingsTab == .general { drawSettingRows("RETURN TO THE MAIN MENU") } else { drawDangerZone() }
-        rect(524,580,392,1,Tac.rule,0.6)
-        text(settingsTab == .danger ? "THESE ACTIONS CANNOT BE UNDONE   //   [TAB] GENERAL" : "SETTINGS ARE SAVED AUTOMATICALLY   //   [TAB] DANGER ZONE",526,594,9,Tac.dim,.medium,true)
-        if let confirming { drawDangerConfirm(confirming) }
+    }
+    /// CONTROLS tab: every rebindable action in two columns, its key boxed on the right.
+    func controlCell(_ i: Int) -> NSRect { NSRect(x:524+Double(i/11)*200,y:290+Double(i%11)*26,width:192,height:24) }
+    func controlKeyBox(_ i: Int) -> NSRect { let r = controlCell(i); return NSRect(x:r.maxX-70,y:r.minY+3,width:64,height:18) }
+    let resetKeysButton = NSRect(x:836,y:588,width:80,height:22)
+    func drawControls() {
+        let blink = Int(ProcessInfo.processInfo.systemUptime*2) % 2 == 0
+        for (i,a) in KeyAction.allCases.enumerated() {
+            let r = controlCell(i), b = controlKeyBox(i), active = rebinding == a
+            let hovered = rebinding == nil && escHovered(r), changed = binds.key(a) != a.defaultKey
+            rect(r.minX,r.minY,r.width,r.height,active ? Tac.hover : hovered ? Tac.hover : Tac.raised,active || hovered ? 1 : 0.8)
+            rect(r.minX,r.minY,2,r.height,active ? Tac.amber : hovered ? Tac.green : changed ? Tac.amber : Tac.rule,changed || active || hovered ? 1 : 0.8)
+            text(a.title,r.minX+10,r.minY+7,9,active ? Tac.amber : Tac.bright,.bold,true)
+            rect(b.minX,b.minY,b.width,b.height,0x000000,0.4)
+            line([CGPoint(x:b.minX,y:b.minY),CGPoint(x:b.maxX,y:b.minY),CGPoint(x:b.maxX,y:b.maxY),CGPoint(x:b.minX,y:b.maxY),CGPoint(x:b.minX,y:b.minY)],active ? Tac.amber : hovered ? Tac.green : Tac.rule)
+            let label = active ? (blink ? "PRESS…" : "") : k(a)
+            text(label,b.midX-textWidth(label,9,.bold,true)/2,b.minY+4,9,active ? Tac.amber : changed ? Tac.amber : Tac.text,.bold,true)
+        }
+    }
+    func drawControlsFooter() {
+        let hint = rebindNote ?? (rebinding != nil ? "PRESS A KEY  //  [ESC] CANCEL  //  [⌫] DEFAULT" : "CLICK AN ACTION, THEN PRESS ITS NEW KEY")
+        text(hint,526,594,9,rebindNote != nil ? Tac.red : rebinding != nil ? Tac.amber : Tac.dim,.medium,true)
+        let b = resetKeysButton, on = !binds.isDefault, over = on && rebinding == nil && escHovered(b)
+        rect(b.minX,b.minY,b.width,b.height,over ? Tac.hover : 0x000000,over ? 1 : 0.35)
+        line([CGPoint(x:b.minX,y:b.minY),CGPoint(x:b.maxX,y:b.minY),CGPoint(x:b.maxX,y:b.maxY),CGPoint(x:b.minX,y:b.maxY),CGPoint(x:b.minX,y:b.minY)],over ? Tac.green : Tac.rule)
+        text("RESET ALL",b.midX-textWidth("RESET ALL",9,.bold,true)/2,b.minY+6,9,on ? (over ? Tac.green : Tac.text) : Tac.rule,.bold,true)
+    }
+    /// Clicks on the CONTROLS tab: pick an action to rebind, or reset every key.
+    func controlsMouseDown(_ p: NSPoint) {
+        if let i = KeyAction.allCases.indices.first(where:{ controlCell($0).contains(p) }) {
+            let a = KeyAction.allCases[i]
+            rebinding = rebinding == a ? nil : a
+            sound.play(SoundEvent(cue:.select))
+        } else if rebinding != nil { rebinding = nil }
+        else if resetKeysButton.contains(p) && !binds.isDefault { binds.resetAll(); sound.play(SoundEvent(cue:.reset)) }
+        needsDisplay = true
+    }
+    /// Takes the next key for the action being rebound. Esc cancels; Delete restores the default.
+    func rebindKeyDown(_ event: NSEvent) {
+        guard let a = rebinding else { return }
+        switch event.keyCode {
+        case 53: rebinding = nil; sound.play(SoundEvent(cue:.select))
+        case 51, 117: binds.reset(a); rebinding = nil; sound.play(SoundEvent(cue:.select))
+        default:
+            if binds.bind(a,event.keyCode) { rebinding = nil; sound.play(SoundEvent(cue:.select)) }
+            else { rebindNote = "THAT KEY IS RESERVED  //  [ESC] CANCEL"; sound.play(SoundEvent(cue:.cease)) }
+        }
+        needsDisplay = true
     }
     func drawDangerZone() {
         text("DANGER ZONE",524,294,11,Tac.red,.heavy,true)
@@ -1053,12 +1221,18 @@ final class GameView: NSView {
         sound.play(SoundEvent(cue:.select)); needsDisplay = true
     }
     func closeLobbySettings() {
-        lobbySettings = false; confirming = nil
+        lobbySettings = false; confirming = nil; rebinding = nil
         sound.play(SoundEvent(cue:.select)); needsDisplay = true
     }
     func showSettingsTab(_ tab: SettingsTab) {
+        rebinding = nil
         guard tab != settingsTab else { return }
         settingsTab = tab; sound.play(SoundEvent(cue:.select)); needsDisplay = true
+    }
+    /// Tab steps through the settings tabs and wraps around.
+    func nextSettingsTab() {
+        let tabs = settingsTabs
+        showSettingsTab(tabs[((tabs.firstIndex(of:settingsTab) ?? 0)+1) % tabs.count])
     }
     func askToConfirm(_ a: DangerAction) { confirming = a; confirmEntry = ""; sound.play(SoundEvent(cue:.cease)); needsDisplay = true }
     /// Runs the confirmed danger action once its word has been typed.
@@ -1066,10 +1240,11 @@ final class GameView: NSView {
         guard let a = confirming, confirmReady else { sound.play(SoundEvent(cue:.cease)); return }
         switch a {
         case .deleteSave:
-            world.bank = 0; withdrawal = 0
-            if persistent { UserDefaults.standard.removeObject(forKey:"bank") }
+            world.bank = 0; withdrawal = 0; world.cleared = 0
+            if persistent { UserDefaults.standard.removeObject(forKey:"bank"); UserDefaults.standard.removeObject(forKey:"cleared") }
         case .resetSettings:
-            sound.resetSettings()
+            sound.resetSettings(); binds.resetAll()
+            if persistent { UserDefaults.standard.removeObject(forKey:"fullScreen") }
         }
         confirming = nil; confirmEntry = ""
         sound.play(SoundEvent(cue:.reset)); needsDisplay = true
@@ -1080,8 +1255,9 @@ final class GameView: NSView {
             else if confirmButton(false).contains(p) { performDanger() }
             return
         }
-        if let tab = [SettingsTab.general,.danger].first(where:{ settingsTabRect($0).contains(p) }) { showSettingsTab(tab); return }
+        if let tab = settingsTabs.first(where:{ settingsTabRect($0).contains(p) }) { showSettingsTab(tab); return }
         if settingsTab == .general { settingsMouseDown(p); return }
+        if settingsTab == .controls { controlsMouseDown(p); return }
         if let a = DangerAction.allCases.first(where:{ dangerButton($0).contains(p) }) { askToConfirm(a) }
         else if escButton(3).contains(p) { closeLobbySettings() }
     }
@@ -1098,7 +1274,8 @@ final class GameView: NSView {
             needsDisplay = true
             return
         }
-        if event.keyCode == Self.tabKey { showSettingsTab(settingsTab == .general ? .danger : .general); return }
+        if rebinding != nil { rebindKeyDown(event); return }
+        if event.keyCode == Self.tabKey { nextSettingsTab(); return }
         switch key {
         case "\u{1b}", "\u{7f}", "s": closeLobbySettings()
         case "f": window?.toggleFullScreen(nil)
@@ -1167,7 +1344,7 @@ final class GameView: NSView {
             sound.play(SoundEvent(cue:.deploy))
         }
     }
-    let bankFrame = NSRect(x:96,y:470,width:584,height:206)
+    let bankFrame = NSRect(x:96,y:572,width:584,height:206)
     enum BankControl: CaseIterable { case less, more, max }
     func bankButton(_ c: BankControl) -> NSRect {
         let r = bankFrame
@@ -1211,12 +1388,13 @@ final class GameView: NSView {
         let arrives = World.delivered(withdrawal)
         text("ARRIVES AS",r.minX+350,r.minY+116,9,Tac.dim,.bold,true)
         text("+\(cr(arrives))",r.minX+350,r.minY+130,16,withdrawal > 0 ? Tac.green : Tac.dim,.semibold,true)
-        text("\(Int(World.withdrawalLoss*100))% OF ANY WITHDRAWAL IS LOST IN TRANSIT · ADDED TO THE \(cr(World.startingCredits)) GRANT",r.minX+22,r.minY+172,9,Tac.dim,.medium,true)
+        text("\(Int(World.withdrawalLoss*100))% OF ANY WITHDRAWAL IS LOST IN TRANSIT · ADDED TO THE OPERATION'S GRANT",r.minX+22,r.minY+172,9,Tac.dim,.medium,true)
     }
     /// Animated surveillance radar for the main menu.
     func drawRadar(_ t:Double) {
         let (cx,cy,r) = (1046.0,470.0,196.0)
-        text("AO SURVEILLANCE  //  ASHFALL",cx-r,cy-r-44,10,Tac.amber,.bold,true)
+        let focus = levels[hoveredLevel ?? nextLevel]
+        text("AO \(focus.operation.replacingOccurrences(of:"OPERATION ",with:""))  //  \(focus.grid)",cx-r,cy-r-44,10,Tac.amber,.bold,true)
         text("LIVE",cx+r-34,cy-r-44,10,Tac.green,.bold,true)
         circle(cx,cy,r,Tac.panel,0.85)
         for k in 1...4 {
@@ -1259,16 +1437,37 @@ final class GameView: NSView {
     }
     func startLevel(_ i:Int) {
         guard levels.indices.contains(i) else { return }
+        guard world.unlocked(i) else {
+            sound.play(SoundEvent(cue:.cease)); return
+        }
+        // A different map size invalidates every cached tile and section image.
+        World.select(i); tiles = [:]; chunkImages = [:]; minimap = nil
+        briefingSince = ProcessInfo.processInfo.systemUptime
         sound.stopEffects(); world.reset(); closeDeploy()
         if withdrawal > 0 && !devMode {
             let arrived = world.withdraw(withdrawal)
-            world.status = "\(cr(withdrawal)) WITHDRAWN FROM THE BANK · \(cr(arrived)) ARRIVED · PRESS E TO DEPLOY TROOPS"
+            world.status = "\(cr(withdrawal)) WITHDRAWN FROM THE BANK · \(cr(arrived)) ARRIVED · PRESS \(k(.troops)) TO DEPLOY TROOPS"
         }
         withdrawal = 0
         sound.play(SoundEvent(cue:.select))
         inMenu = false; previous = ProcessInfo.processInfo.systemUptime
         resetCamera()
         needsDisplay = true
+    }
+    /// Title card naming the operation for a few seconds after it starts.
+    func drawBriefing() {
+        let age = ProcessInfo.processInfo.systemUptime-briefingSince
+        guard age < 4.5 else { return }
+        let a = age < 3.5 ? min(1,age/0.25) : 1-(age-3.5)
+        let spec = World.spec, r = NSRect(x:440,y:196,width:560,height:118)
+        panel(r,Tac.panel,0.9*a,Tac.amber,14)
+        brackets(r.insetBy(dx:-7,dy:-7),Tac.amber,14,a,2)
+        rect(r.minX,r.minY,r.width,4,Tac.amber,a)
+        let head = String(format:"OP-%02d  ·  ",World.level+1)+spec.operation
+        let detail = "\(world.objectives.count) HVTs  ·  GOAL \(pts(spec.requirement))  ·  \(String(format:"%.1f",Double(World.columns)*World.cell/1000)) KM FRONT"
+        text(head,r.midX-textWidth(head,11,.bold,true)/2,r.minY+18,11,Tac.amber,.bold,true,a)
+        text(spec.name,r.midX-textWidth(spec.name,34,.heavy,true)/2,r.minY+36,34,Tac.bright,.heavy,true,a)
+        text(detail,r.midX-textWidth(detail,10,.medium,true)/2,r.minY+86,10,Tac.text,.medium,true,a)
     }
     func escButton(_ i:Int) -> NSRect { NSRect(x:524,y:296+Double(i)*66,width:392,height:56) }
     /// Volume steppers on the settings page's volume row, either side of the level bar.
@@ -1307,12 +1506,13 @@ final class GameView: NSView {
         text(escPage == .settings ? "■ SETTINGS" : "■ SIMULATION HALTED",514,167,10,0x1a1408,.heavy,true)
         let secs = Int(world.elapsed)
         text(String(format:"T+ %02d:%02d",secs/60,secs%60),850,167,10,0x1a1408,.heavy,true)
-        rect(524,212,5,38,Tac.amber)
+        rect(524,212,5,escPage == .settings ? 30 : 38,Tac.amber)
         text(escPage == .settings ? "SETTINGS" : "PAUSED",540,208,30,Tac.bright,.heavy,true)
-        text((escPage == .settings ? "AUDIO AND DISPLAY" : "AWAITING ORDERS, COMMANDER") + (blink ? "_" : ""),542,256,10,Tac.dim,.medium,true)
+        if escPage == .settings { drawSettingsTabs() }
+        else { text("AWAITING ORDERS, COMMANDER" + (blink ? "_" : ""),542,256,10,Tac.dim,.medium,true) }
         rect(524,280,392,1,Tac.rule)
         if escPage == .settings {
-            drawSettingRows("RETURN TO THE PAUSE MENU")
+            if settingsTab == .controls { drawControls() } else { drawSettingRows("RETURN TO THE PAUSE MENU") }
         } else {
             for (i,option) in escOptions.enumerated() {
                 let r = escButton(i), hovered = escHovered(r) && escPage == .main
@@ -1321,7 +1521,8 @@ final class GameView: NSView {
             }
         }
         rect(524,580,392,1,Tac.rule,0.6)
-        text(escPage == .settings ? "SETTINGS ARE SAVED AUTOMATICALLY" : "[TAB] FIELD GUIDE   //   [F] FULL SCREEN",526,594,9,Tac.dim,.medium,true)
+        if escPage == .settings && settingsTab == .controls { drawControlsFooter() }
+        else { text(escPage == .settings ? "SETTINGS ARE SAVED AUTOMATICALLY   //   [TAB] CONTROLS" : "[\(k(.guide))] FIELD GUIDE   //   [F] FULL SCREEN",526,594,9,Tac.dim,.medium,true) }
         if escPage == .exit { drawExitConfirm() }
     }
     /// Sound, volume and full screen rows and a back row, shared by the pause menu and the lobby settings.
@@ -1374,11 +1575,15 @@ final class GameView: NSView {
         sound.play(SoundEvent(cue:.pause))
     }
     func closeEscMenu() {
-        escMenu = false; world.paused = pausedBeforeEscMenu
+        escMenu = false; rebinding = nil; world.paused = pausedBeforeEscMenu
         previous = ProcessInfo.processInfo.systemUptime
         sound.play(SoundEvent(cue:.pause))
     }
-    func showEscPage(_ page:EscPage) { escPage = page; sound.play(SoundEvent(cue:.select)); needsDisplay = true }
+    func showEscPage(_ page:EscPage) {
+        escPage = page; rebinding = nil
+        if page == .settings { settingsTab = .general }
+        sound.play(SoundEvent(cue:.select)); needsDisplay = true
+    }
     func chooseEscOption(_ i:Int) {
         switch i {
         case 0: closeEscMenu()
@@ -1417,7 +1622,10 @@ final class GameView: NSView {
         switch escPage {
         case .main:
             if let i = escOptions.indices.first(where:{ escButton($0).contains(p) }) { chooseEscOption(i) }
-        case .settings: settingsMouseDown(p)
+        case .settings:
+            if let tab = settingsTabs.first(where:{ settingsTabRect($0).contains(p) }) { showSettingsTab(tab) }
+            else if settingsTab == .controls { controlsMouseDown(p) }
+            else { settingsMouseDown(p) }
         case .exit:
             if let i = (0..<3).first(where:{ exitButton($0).contains(p) }) { chooseExit(i) }
         }
@@ -1435,12 +1643,13 @@ final class GameView: NSView {
         if let i = (0..<4).first(where:{ escButton($0).contains(p) }) { chooseSetting(i) }
     }
     func escKeyDown(_ key:String?,_ event:NSEvent,_ command:Bool) {
+        if rebinding != nil && !command { rebindKeyDown(event); return }
         if key == "f" { window?.toggleFullScreen(nil); return }
         switch escPage {
         case .main:
             switch key {
             case "\u{1b}", "\r", "\u{3}": chooseEscOption(0)
-            case _ where event.keyCode == Self.tabKey || event.keyCode == Self.f1Key: closeEscMenu(); help = true
+            case _ where event.keyCode == binds.key(.guide) || event.keyCode == Self.f1Key: closeEscMenu(); help = true
             case "r": chooseEscOption(1)
             case "s": chooseEscOption(2)
             case "q" where !command: chooseEscOption(3)
@@ -1448,9 +1657,10 @@ final class GameView: NSView {
             default: super.keyDown(with:event)
             }
         case .settings:
+            if event.keyCode == Self.tabKey { nextSettingsTab(); return }
             switch key {
             case "\u{1b}", "\u{7f}", "\r", "\u{3}": showEscPage(.main)
-            case "m": chooseSetting(0)
+            case "m" where settingsTab == .general: chooseSetting(0)
             case "[", "-": sound.adjustVolume(-0.1)
             case "]", "=", "+": sound.adjustVolume(0.1)
             default: super.keyDown(with:event)
@@ -1498,8 +1708,9 @@ final class GameView: NSView {
         iconButton(menuButtonFrame,"ESC") { r,c in for k in 0..<3 { self.rect(r.minX+16,r.minY+13+Double(k)*7,24,3,c) } }
         iconButton(guideButtonFrame,"TAB",help) { r,c in self.text("?",r.minX+20,r.minY+6,22,c,.heavy,true) }
         let t = Int(world.elapsed)
-        text("OPERATION",164,27,9,Tac.dim,.bold,true)
-        text("ASHFALL",164,42,24,Tac.bright,.heavy,true)
+        text(String(format:"OP-%02d · OPERATION",World.level+1),164,27,9,Tac.dim,.bold,true)
+        let op = World.spec.operation.replacingOccurrences(of:"OPERATION ",with:"")
+        text(op,164,42,min(24,24*126/textWidth(op,24,.heavy,true)),Tac.bright,.heavy,true)
         text(String(format:"T+%02d:%02d",t/60,t%60),164,74,9,Tac.dim,.medium,true)
         // Troops, with selection in the label and ammo trouble beside the count.
         let selected = world.soldiers.filter{$0.selected}.count
@@ -1527,28 +1738,30 @@ final class GameView: NSView {
         let deploy = dockFrame(.deploy)
         let deploySub: String
         if placingTroops { deploySub = "CLICK THE GREEN ZONE · RMB/ESC DONE" }
-        else if placing != nil { deploySub = "FROM \(world.supportSide.map{ $0 > 0 ? "WEST" : "EAST" } ?? "NEAR EDGE") · Q/E SIDE · ESC DONE" }
-        else if low+dry > 0 { deploySub = "AMMO LOW · [Q] CALL A SUPPLY DROP" }
+        else if placing != nil { deploySub = "FROM \(world.supportSide.map{ $0 > 0 ? "WEST" : "EAST" } ?? "NEAR EDGE") · \(k(.support))/\(k(.troops)) SIDE · ESC DONE" }
+        else if low+dry > 0 { deploySub = "AMMO LOW · [\(k(.support))] CALL A SUPPLY DROP" }
         else { deploySub = "TROOPS & SUPPORT" }
-        button(placingName.map{"PLACING ▸ \($0)"} ?? "+ DEPLOY",deploySub,deploy.minX,deploy.width,true,"E")
-        button(allSelected ? "DESELECT ALL" : "SELECT ALL",allSelected ? "CLEAR SELECTION" : "COMMAND PLATOON",dockFrame(.selectAll).minX,dockFrame(.selectAll).width,false,"A")
-        button("CEASE FIRE","HOLD POSITION",dockFrame(.cease).minX,dockFrame(.cease).width,false,"H")
+        button(placingName.map{"PLACING ▸ \($0)"} ?? "+ DEPLOY",deploySub,deploy.minX,deploy.width,true,k(.troops))
+        button(allSelected ? "DESELECT ALL" : "SELECT ALL",allSelected ? "CLEAR SELECTION" : "COMMAND PLATOON",dockFrame(.selectAll).minX,dockFrame(.selectAll).width,false,k(.selectAll))
+        button("CEASE FIRE","HOLD POSITION",dockFrame(.cease).minX,dockFrame(.cease).width,false,k(.cease))
         let short = World.requirement-world.points
-        button("EXTRACT",world.missionReady ? "MISSION READY" : "\(pts(short)) TO GO",dockFrame(.extract).minX,dockFrame(.extract).width,world.missionReady,"X")
+        button("EXTRACT",world.missionReady ? "MISSION READY" : "\(pts(short)) TO GO",dockFrame(.extract).minX,dockFrame(.extract).width,world.missionReady,k(.extract))
     }
     let muteTagFrame = NSRect(x:1360,y:46,width:60,height:18)
-    /// Pause and game speed in the top bar: a pause switch then 1× / 2× / 4×.
-    /// Cell 0 is pause; cells 1-3 are the speeds.
+    /// Pause and game speed in the top bar: a pause switch then 0.25× / 1× / 2× / 4×.
+    /// Cell 0 is pause; cells 1-4 are the speeds.
     func tempoCell(_ i:Int) -> NSRect {
-        i == 0 ? NSRect(x:1104,y:44,width:46,height:34) : NSRect(x:1156+Double(i-1)*64,y:44,width:58,height:34)
+        i == 0 ? NSRect(x:1080,y:44,width:46,height:34) : NSRect(x:1132+Double(i-1)*57,y:44,width:54,height:34)
     }
-    /// Green at real time; amber once the clock runs fast, red at full speed.
-    func tempoColor(_ speed:Int) -> UInt32 { speed >= 4 ? Tac.red : speed > 1 ? Tac.amber : Tac.green }
+    /// Green at real time; cyan in slow motion; amber once the clock runs fast, red at full speed.
+    func tempoColor(_ speed:Double) -> UInt32 { speed >= 4 ? Tac.red : speed > 1 ? Tac.amber : speed < 1 ? Tac.cyan : Tac.green }
+    func speedLabel(_ speed:Double) -> String { speed < 1 ? "0.25×" : "\(Int(speed))×" }
     func drawTempo() {
         let paused = world.paused, active = paused ? Tac.amber : tempoColor(world.speed)
         let blink = paused || Int(world.elapsed*2) % 2 == 0
-        circle(1108,32,3.5,active,blink ? 1 : 0.25)
-        text(paused ? "HOLD · PAUSED" : world.speed == 1 ? "LIVE · REAL TIME" : world.speed == 2 ? "FAST FWD 2×" : "MAX FWD 4×",1118,25,9,active,.bold,true)
+        circle(1084,32,3.5,active,blink ? 1 : 0.25)
+        let mode = world.speed < 1 ? "SLOW MO 0.25×" : world.speed == 1 ? "LIVE · REAL TIME" : world.speed == 2 ? "FAST FWD 2×" : "MAX FWD 4×"
+        text(paused ? "HOLD · PAUSED" : mode,1094,25,9,active,.bold,true)
         func frame(_ cell: NSRect,_ on: Bool,_ c: UInt32,_ over: Bool) {
             rect(cell.minX,cell.minY,cell.width,cell.height,on ? c : 0x000000,on ? 0.2 : (over ? 0.15 : 0.35))
             line([CGPoint(x:cell.minX,y:cell.minY),CGPoint(x:cell.maxX,y:cell.minY),CGPoint(x:cell.maxX,y:cell.maxY),CGPoint(x:cell.minX,y:cell.maxY),CGPoint(x:cell.minX,y:cell.minY)],on ? c : (over ? Tac.dim : Tac.rule),1)
@@ -1566,12 +1779,13 @@ final class GameView: NSView {
             let over = isHovering && cell.contains(NSPoint(x:pointer.x,y:pointer.y))
             frame(cell,on && !paused,c,over)
             // Chevrons light up with speed, one more per doubling, like throttle detents.
-            for k in 0..<3 { text("›",cell.minX+7+Double(k)*4,cell.minY+9,10,k <= i ? (on ? c : Tac.dim) : Tac.rule,.heavy,true) }
-            text("\(speed)×",cell.minX+26,cell.minY+9,11,on ? Tac.bright : Tac.dim,.bold,true)
+            for k in 0..<3 { text("›",cell.minX+6+Double(k)*4,cell.minY+9,10,k < i ? (on ? c : Tac.dim) : Tac.rule,.heavy,true) }
+            text(speedLabel(speed),cell.minX+20,cell.minY+9,11,on ? Tac.bright : Tac.dim,.bold,true)
         }
-        text("SPACE · T",1156+3*64-textWidth("SPACE · T",8,.bold,true)-6,84,8,Tac.dim,.bold,true)
+        let tempoKeys = "\(k(.pause)) · \(k(.speed))"
+        text(tempoKeys,tempoCell(World.speeds.count).maxX-textWidth(tempoKeys,8,.bold,true),84,8,Tac.dim,.bold,true)
     }
-    func setSpeed(_ speed:Int) {
+    func setSpeed(_ speed:Double) {
         if world.paused { togglePause() }
         guard speed != world.speed else { return }
         world.speed = speed; tempoChanged()
@@ -1579,7 +1793,8 @@ final class GameView: NSView {
     func cycleSpeed() { world.cycleSpeed(); tempoChanged() }
     func tempoChanged() {
         sound.play(SoundEvent(cue:.select))
-        world.status = world.speed == 1 ? "TEMPO 1× · REAL TIME" : "TEMPO \(world.speed)× · SIMULATION RUNNING FAST · [T] TO CHANGE"
+        let s = speedLabel(world.speed), key = k(.speed)
+        world.status = world.speed == 1 ? "TEMPO 1× · REAL TIME" : world.speed < 1 ? "TEMPO \(s) · SLOW MOTION · [\(key)] TO CHANGE" : "TEMPO \(s) · SIMULATION RUNNING FAST · [\(key)] TO CHANGE"
     }
     /// Red brackets around intact high-value targets and floating score popups.
     func drawObjectiveMarkers() {
@@ -1618,7 +1833,7 @@ final class GameView: NSView {
         let hovered = isHovering && h.contains(NSPoint(x:pointer.x,y:pointer.y))
         panel(r,hovered ? Tac.hover : Tac.panel,0.9); rect(h.minX,h.minY,h.width,h.height,Tac.red,0.14); rect(h.minX,h.minY,3,r.height,Tac.red)
         text("▲ HIGH-VALUE TARGETS",h.minX+12,h.minY+5,10,Tac.red,.bold,true)
-        text("\(done)/\(world.objectives.count) DOWN  \(showTargets ? "▴" : "▾") [O]",h.maxX-128,h.minY+5,9,hovered ? Tac.bright : Tac.text,.bold,true)
+        text("\(done)/\(world.objectives.count) DOWN  \(showTargets ? "▴" : "▾") [\(k(.targets))]",h.maxX-128,h.minY+5,9,hovered ? Tac.bright : Tac.text,.bold,true)
         guard showTargets else { return }
         for (i,o) in world.objectives.enumerated() {
             let ry = h.maxY+6+Double(i)*18
@@ -1647,12 +1862,13 @@ final class GameView: NSView {
     func closeDeploy() { deployMenu = false; placing = nil }
     var placingTroops: Bool { if case .troops = placing { return true }; return false }
     var placingSupport: Bool { if case .support = placing { return true }; return false }
-    /// While support is armed, Q brings the aircraft in from the west and E from the east;
+    /// While support is armed, the support key (Q) brings the aircraft in from the west and the troops key (E) from the east;
     /// pressing the active side again goes back to the nearer edge.
     func chooseSupportSide(_ heading: Double) {
         world.supportSide = world.supportSide == heading ? nil : heading
-        world.status = world.supportSide.map{ "SUPPORT RUNS IN FROM THE \($0 > 0 ? "WEST" : "EAST") · Q WEST · E EAST" }
-            ?? "SUPPORT RUNS IN FROM THE NEARER EDGE · Q WEST · E EAST"
+        let sides = "\(k(.support)) WEST · \(k(.troops)) EAST"
+        world.status = world.supportSide.map{ "SUPPORT RUNS IN FROM THE \($0 > 0 ? "WEST" : "EAST") · \(sides)" }
+            ?? "SUPPORT RUNS IN FROM THE NEARER EDGE · \(sides)"
         sound.play(SoundEvent(cue:.select))
     }
     /// Opens the requisition menu on `tab`, switches to it, or closes the menu if it is already showing.
@@ -1677,7 +1893,8 @@ final class GameView: NSView {
             placing = .support(i)
             world.status = (World.support[i].kind == .gunRun ? "CLICK THE GROUND TO STRAFE"
                 : World.support[i].kind == .firebomb ? "CLICK THE GROUND TO FIREBOMB"
-                : "CLICK THE MAP TO DROP A \(World.support[i].name)")+" · Q/E RUN IN FROM WEST/EAST · RIGHT-CLICK OR ESC WHEN DONE"
+                : World.support[i].kind == .drone ? "CLICK WHERE THE DRONE SHOULD FLY TO, THEN STEER IT"
+                : "CLICK THE MAP TO DROP A \(World.support[i].name)")+" · \(k(.support))/\(k(.troops)) RUN IN FROM WEST/EAST · RIGHT-CLICK OR ESC WHEN DONE"
         } else {
             placing = .troops(i); showDeployZone()
             world.status = "PLACE \(World.offers[i].name) IN THE LANDING ZONE · RIGHT-CLICK OR ESC WHEN DONE"
@@ -1875,6 +2092,41 @@ final class GameView: NSView {
         }
         ctx.restoreGState()
     }
+    /// A kamikaze quadcopter seen side-on, leaning with its tilt: a squat body with the charge
+    /// slung under it, an arm out to a motor at each end, and a rotor blur that thickens with
+    /// throttle and stops once the battery is dead.
+    func drawDrone(_ d: Drone, ghost: Bool = false) {
+        guard let ctx = NSGraphicsContext.current?.cgContext else { return }
+        ctx.saveGState()
+        if ghost { ctx.setAlpha(0.5) }
+        ctx.translateBy(x:d.position.x,y:d.position.y); ctx.rotate(by:d.tilt)
+        let body: UInt32 = 0x3a4246, dark: UInt32 = 0x1e2427
+        rect(-11,-2,22,2,dark)
+        rect(-5,-4,10,5,body); rect(-4,-4,8,1,0x56606a)
+        // Charge and its fuse cap under the body.
+        rect(-3,1,6,3,0x6b5a3a); rect(-1.5,4,3,1.5,0xd8a040)
+        for sx in [-10.0,10.0] {
+            rect(sx-1,-5,2,4,dark)
+            if d.powered {
+                let blur = NSBezierPath(ovalIn:NSRect(x:sx-7,y:-6.5,width:14,height:2.5))
+                color(0xc8ccc0,0.2+0.35*d.throttle).setFill(); blur.fill()
+                let spin = sin(world.elapsed*60+sx)*6
+                rect(sx+min(0,spin),-5.8,abs(spin),1,0x2a302c,0.7)
+            } else { rect(sx-6,-5.5,12,1,0x2a302c) }
+        }
+        if Int(world.elapsed*4) % 2 == 0 && !ghost && !d.shorted { rect(-1,-5,2,1.5,0xff4030) }
+        ctx.restoreGState()
+    }
+    /// A piloted drone's blast ring and a faint line to the point it is flying to.
+    func drawDroneAim(_ d: Drone) {
+        guard d.piloted else { return }
+        let r = World.droneBlastRadius, ring = NSBezierPath(ovalIn:NSRect(x:d.position.x-r,y:d.position.y-r,width:r*2,height:r*2))
+        ring.lineWidth = 1/zoom; color(Tac.red,0.3).setStroke(); ring.stroke()
+        guard d.powered else { return }
+        line([CGPoint(x:d.position.x,y:d.position.y),CGPoint(x:d.aim.x,y:d.aim.y)],Tac.amber,1/zoom,0.25)
+        let a = d.aim, s = 4/zoom
+        polygon([CGPoint(x:a.x,y:a.y-s),CGPoint(x:a.x+s,y:a.y),CGPoint(x:a.x,y:a.y+s),CGPoint(x:a.x-s,y:a.y)],Tac.amber,0.5)
+    }
     /// Preview of a support call at the pointer: where it will land and what it covers.
     func drawSupportGhost(_ offer: SupportOffer) {
         let w = toWorld(pointer)
@@ -1907,6 +2159,14 @@ final class GameView: NSView {
             if world.refusal(offer) != nil { line([CGPoint(x:w.x-6,y:g-36),CGPoint(x:w.x+6,y:g-24)],Tac.red,2); line([CGPoint(x:w.x+6,y:g-36),CGPoint(x:w.x-6,y:g-24)],Tac.red,2) }
         case .firebomb:
             drawFirebombGhost(offer,at:w.x)
+        case .drone:
+            // The run in at cruise height and where control passes to the player.
+            let alt = world.droneCruise, g = world.ground(at:w.x)
+            line([CGPoint(x:w.x-260*h,y:alt),CGPoint(x:w.x-14*h,y:alt)],Tac.amber,1/zoom,0.3)
+            polygon([CGPoint(x:w.x-14*h,y:alt),CGPoint(x:w.x-22*h,y:alt-4),CGPoint(x:w.x-22*h,y:alt+4)],Tac.amber,0.35)
+            line([CGPoint(x:w.x,y:alt+10),CGPoint(x:w.x,y:g-4)],Tac.amber,1/zoom,0.2)
+            drawDrone(Drone(position:Vec(x:w.x,y:alt),velocity:Vec(x:0,y:0),heading:h,arrival:Vec(x:w.x,y:alt),aim:Vec(x:w.x,y:alt)),ghost:true)
+            if world.refusal(offer) != nil { line([CGPoint(x:w.x-6,y:alt-18),CGPoint(x:w.x+6,y:alt-6)],Tac.red,2); line([CGPoint(x:w.x+6,y:alt-18),CGPoint(x:w.x-6,y:alt-6)],Tac.red,2) }
         }
     }
     /// Screen-space labels over each crate: inbound while falling, rounds and seconds left once down.
@@ -1921,6 +2181,18 @@ final class GameView: NSView {
             let p = toScreen(Vec(x:plane.x,y:plane.y-60))
             guard p.x > -60 && p.x < 1500 && p.y > 110 && p.y < 775 else { continue }
             text(plane.dropped ? "SUPPLY PLANE · RTB" : "SUPPLY PLANE",p.x-36,p.y-14,9,Tac.amber,.bold,true)
+        }
+        if let d = world.drone {
+            let p = toScreen(Vec(x:d.position.x,y:d.position.y-12))
+            if p.x > -60 && p.x < 1500 && p.y > 110 && p.y < 775 {
+                let label = !d.piloted ? "DRONE · INBOUND" : d.powered ? "DRONE · \(Int(d.battery.rounded(.up)))S" : "DRONE · NO POWER"
+                let c = d.piloted && (!d.powered || d.battery < 5) ? Tac.red : Tac.amber
+                text(label,p.x-textWidth(label,9,.bold,true)/2,p.y-26,9,c,.bold,true)
+                if d.piloted {
+                    let share = max(0,d.battery)/World.droneBattery, w = 24.0
+                    rect(p.x-w/2-1,p.y-12,w+2,5,0x000000,0.55); rect(p.x-w/2,p.y-11,w*share,3,c)
+                }
+            }
         }
         for jet in world.jets {
             let p = toScreen(Vec(x:jet.x,y:jet.path.y-34))
@@ -1957,7 +2229,7 @@ final class GameView: NSView {
         rect(f.minX,f.minY,f.width-12,22,Tac.amber,0.85)
         text("▲ REQUISITION // \(deployTab == .troops ? "DEPLOY TROOPS" : "CALL IN SUPPORT")",f.minX+12,f.minY+5,10,0x1a1408,.heavy,true)
         text("[ESC] CLOSE",f.maxX-94,f.minY+5,10,0x1a1408,.heavy,true)
-        for (tab,label) in [(RequisitionTab.troops,"TROOPS  [E]"),(.support,"SUPPORT  [Q]")] {
+        for (tab,label) in [(RequisitionTab.troops,"TROOPS  [\(k(.troops))]"),(.support,"SUPPORT  [\(k(.support))]")] {
             let r = deployTabRect(tab), open = deployTab == tab
             let hovered = isHovering && r.contains(NSPoint(x:pointer.x,y:pointer.y))
             rect(r.minX,r.minY,r.width,r.height,open ? Tac.hover : Tac.raised)
@@ -1986,13 +2258,15 @@ final class GameView: NSView {
             text(reason ?? (deployTab == .troops ? "READY ▸ PLACE" : "READY ▸ DROP"),r.maxX-104,r.minY+36,9,reason == nil ? Tac.green : Tac.red,.bold,true)
         }
         if deployTab == .support {
-            text("All fly in from the west. Crates rearm troops in their ring; the jet",f.minX+16,f.minY+286,10,Tac.dim)
-            text("strafes the strip you click; the C-130 sets the area burning.",f.minX+16,f.minY+302,10,Tac.dim)
+            text("Crates rearm troops in their ring; the jet strafes the strip you",f.minX+16,f.minY+350,10,Tac.dim)
+            text("click; the C-130 sets it burning; the drone is yours to fly in.",f.minX+16,f.minY+366,10,Tac.dim)
         }
         text(deployTab == .troops ? "[1-\(World.offers.count)] SELECT · THEN CLICK INSIDE THE GREEN LANDING ZONE" : "[1-\(World.support.count)] SELECT · THEN CLICK THE MAP TO CALL IT IN",f.minX+16,f.maxY-20,9,Tac.dim,.medium,true)
     }
     func extract() {
+        let cleared = world.cleared
         guard world.extract() else { sound.play(SoundEvent(cue:.cease)); return }
+        unlockedNow = world.cleared > cleared && world.cleared < levels.count ? world.cleared : nil
         debrief = true; panKeys.removeAll(); closeDeploy()
         sound.sync(paused:true,active:NSApp.isActive)
         sound.play(SoundEvent(cue:.select))
@@ -2004,7 +2278,8 @@ final class GameView: NSView {
         brackets(r,Tac.green,16,0.6,2)
         rect(540,272,5,40,Tac.green)
         text("MISSION COMPLETE",558,272,28,Tac.bright,.heavy,true)
-        text("OPERATION ASHFALL · PLATOON EXTRACTED",560,312,10,Tac.green,.medium,true)
+        let unlocked = unlockedNow.map { String(format:" · OP-%02d UNLOCKED",$0+1) } ?? ""
+        text("\(World.spec.operation) · PLATOON EXTRACTED"+unlocked,560,312,10,Tac.green,.medium,true)
         let t = Int(world.elapsed)
         let lines = [("FINAL POINTS",pts(world.points)),("GOAL",pts(World.requirement)),
                      ("NEXT ROUND CREDITS","+\(cr(World.credits(for:world.points)))"),("CREDITS BANKED","+\(cr(world.banked))"),
@@ -2032,7 +2307,7 @@ final class GameView: NSView {
             inMenu = true; help = true; resetCamera()
         } else {
             world.paused = false; previous = ProcessInfo.processInfo.systemUptime
-            world.status = "OPERATION CONTINUES · PRESS X TO EXTRACT AGAIN"
+            world.status = "OPERATION CONTINUES · PRESS \(k(.extract)) TO EXTRACT AGAIN"
         }
         sound.play(SoundEvent(cue:.select))
         needsDisplay = true
@@ -2094,6 +2369,8 @@ final class GameView: NSView {
             if targetsHeader.contains(NSPoint(x:p.x,y:p.y)) { toggleTargets(); return }
             if minimapFrame.insetBy(dx:-6,dy:-6).contains(NSPoint(x:p.x,y:p.y)) { jumpToMinimap(p); return }
             if let placement = placing { place(placement,at:toWorld(p).x); return }
+            // While a drone is under control, a click on the field sets it off.
+            if world.drone?.piloted == true { world.detonateDrone(); needsDisplay = true; return }
             let w = toWorld(p), reach = 16/min(1,zoom), mid = Soldier.height/2
             if let index = world.soldiers.indices.min(by:{ hypot(world.soldiers[$0].position.x-w.x,world.soldiers[$0].position.y-mid-w.y) < hypot(world.soldiers[$1].position.x-w.x,world.soldiers[$1].position.y-mid-w.y) }), hypot(world.soldiers[index].position.x-w.x,world.soldiers[index].position.y-mid-w.y) < reach {
                 // Clicking the only selected soldier again deselects them.
@@ -2102,11 +2379,52 @@ final class GameView: NSView {
                 if event.modifierFlags.contains(.shift) { world.soldiers[index].selected.toggle() }
                 else { for i in world.soldiers.indices { world.soldiers[i].selected = i == index } }
                 sound.play(SoundEvent(cue:.select))
-                if !world.soldiers.contains(where:{$0.selected}) { world.status = "SELECTION CLEARED · CLICK A SOLDIER OR PRESS A" }
+                if !world.soldiers.contains(where:{$0.selected}) { world.status = "SELECTION CLEARED · CLICK A SOLDIER OR PRESS \(k(.selectAll))" }
                 else { world.status = world.rocketsSelected ? "RPG READY · AIM WITH THE POINTER, CLICK TO FIRE / RIGHT-CLICK TO MOVE" : "UNIT SELECTED · CLICK TO ATTACK / RIGHT-CLICK TO MOVE" }
-            } else { world.attack(w) }
+            } else { press = (p,w,false) }
         }
         needsDisplay = true
+    }
+    override func mouseUp(with event:NSEvent) {
+        guard let pressed = press else { return }
+        press = nil
+        guard !inMenu && !escMenu && !debrief else { return }
+        if pressed.boxing { boxSelect(from:pressed.world,to:toWorld(point(event)),adding:event.modifierFlags.contains(.shift)) }
+        else { world.attack(pressed.world) }
+        needsDisplay = true
+    }
+    /// The world rectangle a selection box spans, from its anchor to the pointer.
+    func selectionBox(from a:Vec,to b:Vec) -> NSRect {
+        NSRect(x:min(a.x,b.x),y:min(a.y,b.y),width:abs(a.x-b.x),height:abs(a.y-b.y))
+    }
+    /// Soldiers whose body overlaps the box.
+    func soldiersIn(_ box:NSRect) -> [Int] {
+        world.soldiers.indices.filter{
+            let s = world.soldiers[$0].position
+            return box.intersects(NSRect(x:s.x-4,y:s.y-Soldier.height,width:8,height:Soldier.height))
+        }
+    }
+    /// Selects the troops inside a dragged box; with Shift held they join the current selection.
+    func boxSelect(from a:Vec,to b:Vec,adding:Bool) {
+        let inside = Set(soldiersIn(selectionBox(from:a,to:b)))
+        for i in world.soldiers.indices { world.soldiers[i].selected = inside.contains(i) || (adding && world.soldiers[i].selected) }
+        sound.play(SoundEvent(cue:.select))
+        let count = world.soldiers.filter{$0.selected}.count
+        if count == 0 { world.status = "SELECTION CLEARED · CLICK A SOLDIER OR PRESS \(k(.selectAll))" }
+        else { world.status = world.rocketsSelected ? "RPG READY · AIM WITH THE POINTER, CLICK TO FIRE / RIGHT-CLICK TO MOVE" : "\(count) SELECTED · CLICK TO ATTACK / RIGHT-CLICK TO MOVE" }
+    }
+    /// The dragged selection box and brackets on the troops it would take.
+    func drawSelectionBox() {
+        guard let pressed = press, pressed.boxing else { return }
+        let a = toScreen(pressed.world), b = pointer
+        let clampY = { (y:Double) in max(104,min(808,y)) }
+        let r = NSRect(x:min(a.x,b.x),y:clampY(min(a.y,b.y)),width:abs(a.x-b.x),height:clampY(max(a.y,b.y))-clampY(min(a.y,b.y)))
+        rect(r.minX,r.minY,r.width,r.height,Tac.green,0.08)
+        line([CGPoint(x:r.minX,y:r.minY),CGPoint(x:r.maxX,y:r.minY),CGPoint(x:r.maxX,y:r.maxY),CGPoint(x:r.minX,y:r.maxY),CGPoint(x:r.minX,y:r.minY)],Tac.green,1,0.7)
+        for i in soldiersIn(selectionBox(from:pressed.world,to:toWorld(pointer))) {
+            let s = toScreen(world.soldiers[i].position), h = Soldier.height*zoom
+            brackets(NSRect(x:s.x-max(6,5*zoom),y:s.y-h-3,width:max(12,10*zoom),height:h+6),Tac.green,4,0.9,1)
+        }
     }
     override func rightMouseDown(with event:NSEvent) {
         let p = point(event)
@@ -2120,6 +2438,8 @@ final class GameView: NSView {
     }
     override func mouseDragged(with event:NSEvent) {
         let p = point(event); pointer = p
+        if let pressed = press, !pressed.boxing, hypot(p.x-pressed.screen.x,p.y-pressed.screen.y) >= boxThreshold { press?.boxing = true }
+        if press != nil { needsDisplay = true; return }
         if !inMenu && !escMenu && minimapFrame.contains(NSPoint(x:p.x,y:p.y)) { jumpToMinimap(p) }
     }
     override func otherMouseDown(with event:NSEvent) { dragAnchor = point(event) }
@@ -2167,17 +2487,40 @@ final class GameView: NSView {
     func deselectAll() {
         sound.play(SoundEvent(cue:.select))
         for i in world.soldiers.indices { world.soldiers[i].selected = false }
-        world.status = "SELECTION CLEARED · CLICK A SOLDIER OR PRESS A"
+        world.status = "SELECTION CLEARED · CLICK A SOLDIER OR PRESS \(k(.selectAll))"
     }
-    /// Arrow keys pan the camera (key codes: ← → ↓ ↑).
-    static let panKeyCodes: Set<UInt16> = [123,124,125,126]
-    /// Key codes for Tab and F1, which toggle the field guide in every game state.
+    /// Key codes for Tab, which steps through settings tabs, and F1, which always opens the field guide.
     static let tabKey: UInt16 = 48, f1Key: UInt16 = 122
+    /// Runs a rebindable in-game action. While support is armed, the support and troops keys
+    /// pick the west and east run-in sides instead.
+    func perform(_ action: KeyAction) {
+        switch action {
+        case .selectAll: selectAll()
+        case .troops: if placingSupport { chooseSupportSide(-1) } else { toggleDeployMenu() }
+        case .support: if placingSupport { chooseSupportSide(1) } else { toggleDeployMenu(.support) }
+        case .extract: extract()
+        case .cease: world.cease()
+        case .pause: togglePause()
+        case .speed: cycleSpeed()
+        case .centre: focusSelection()
+        case .targets: toggleTargets()
+        case .guide: toggleHelp()
+        case .detonate: if !world.detonateDrone() { world.status = "NO DRONE IN THE AIR · CALL ONE FROM SUPPORT [\(k(.support))]" }
+        case .panLeft, .panRight, .panUp, .panDown: break
+        case .zoomIn: zoom(by:1.25,at:Vec(x:720,y:456))
+        case .zoomOut: zoom(by:0.8,at:Vec(x:720,y:456))
+        case .zoomReset: zoom(by:1/zoom,at:Vec(x:720,y:456))
+        case .mute: sound.toggleMute()
+        case .volumeDown: sound.adjustVolume(-0.1)
+        case .volumeUp: sound.adjustVolume(0.1)
+        }
+    }
     override func keyDown(with event:NSEvent) {
         guard !event.isARepeat else { return }
         let key = event.charactersIgnoringModifiers?.lowercased()
         let command = !event.modifierFlags.intersection([.command,.control]).isEmpty
-        if !inMenu && !escMenu && !debrief && !command && Self.panKeyCodes.contains(event.keyCode) { panKeys.insert(event.keyCode); return }
+        let action = command ? nil : binds.action(for:event.keyCode)
+        if !inMenu && !escMenu && !debrief, let action, [.panLeft,.panRight,.panUp,.panDown].contains(action) { panKeys.insert(event.keyCode); return }
         if debrief {
             switch key {
             case "\r", "\u{3}": chooseDebriefOption(0)
@@ -2199,34 +2542,16 @@ final class GameView: NSView {
             case "s": openLobbySettings()
             case _ where event.keyCode == 123 || event.keyCode == 0: adjustWithdrawal(.less)
             case _ where event.keyCode == 124 || event.keyCode == 2: adjustWithdrawal(.more)
-            case "\r", "\u{3}": startLevel(0)
+            case "\r", "\u{3}": startLevel(nextLevel)
             case let key?: if let n = Int(key) { startLevel(n-1) } else { super.keyDown(with:event) }
             default: super.keyDown(with:event)
             }
             return
         }
-        if event.keyCode == Self.tabKey || event.keyCode == Self.f1Key { toggleHelp(); return }
         if let key, let n = Int(key), n >= 1 { choose(n-1); return }
+        if let action { perform(action); return }
         switch key {
-        case "a": selectAll()
-        case "q" where placingSupport: chooseSupportSide(1)
-        case "e" where placingSupport: chooseSupportSide(-1)
-        case "e": toggleDeployMenu()
-        case "q": toggleDeployMenu(.support)
-        case "x": extract()
-        case "h": world.cease()
-        case "t": cycleSpeed()
-        case " ", "p": togglePause()
-        case "m": sound.toggleMute()
-        case "[": sound.adjustVolume(-0.1)
-        case "]": sound.adjustVolume(0.1)
-        case "/", "?": toggleHelp()
-        case "o": toggleTargets()
         case "f": window?.toggleFullScreen(nil)
-        case "=", "+": zoom(by:1.25,at:Vec(x:720,y:456))
-        case "-", "_": zoom(by:0.8,at:Vec(x:720,y:456))
-        case "0": zoom(by:1/zoom,at:Vec(x:720,y:456))
-        case "c": focusSelection()
         case "\u{1b}":
             if deployMenu || placing != nil { closeDeploy(); world.status = "DEPLOYMENT COMPLETE · AWAITING ORDERS" }
             else if world.soldiers.contains(where:{$0.selected}) { deselectAll() }

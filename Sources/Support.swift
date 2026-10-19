@@ -1,7 +1,7 @@
 import Foundation
 
 /// Off-map support the requisition menu's SUPPORT tab can call in.
-enum SupportKind { case supplyCrate, gunRun, firebomb }
+enum SupportKind { case supplyCrate, gunRun, firebomb, drone }
 /// A line in the SUPPORT tab: what is called in and what it costs.
 struct SupportOffer {
     let name: String
@@ -56,7 +56,8 @@ struct StrafeJet {
 extension World {
     static let support = [SupportOffer(name:"SUPPLY CRATE",detail:"AIRDROP · AMMO FOR 10 RIFLEMEN · LASTS 45 S",kind:.supplyCrate,cost:150),
                           SupportOffer(name:"GUN RUN",detail:"STRAFING PASS · 30MM BURST WALKED ACROSS 480 PX",kind:.gunRun,cost:1000),
-                          SupportOffer(name:"FIREBOMBS",detail:"C-130 · 8 NAPALM CANISTERS · LONG-BURNING FIRES",kind:.firebomb,cost:2000)]
+                          SupportOffer(name:"FIREBOMBS",detail:"C-130 · 8 NAPALM CANISTERS · LONG-BURNING FIRES",kind:.firebomb,cost:2000),
+                          SupportOffer(name:"KAMIKAZE DRONE",detail:"QUADCOPTER · YOU PILOT IT WITH THE POINTER · 20 S BATTERY",kind:.drone,cost:World.droneCost)]
     /// Reach of a landed crate, in world px from its centre.
     static let crateRadius = 120.0
     /// Seconds a landed crate keeps rearming troops.
@@ -186,12 +187,14 @@ extension World {
         case .supplyCrate: return 0
         case .gunRun: return gunRunCooldown
         case .firebomb: return firebombCooldown
+        case .drone: return droneCooldown
         }
     }
     /// Why a support call can't be bought right now, or nil if it can.
     func refusal(_ offer: SupportOffer) -> String? {
         let wait = cooldown(offer.kind)
         if wait > 0 { return "COOLDOWN \(Int(wait.rounded(.up)))S" }
+        if offer.kind == .drone && drone != nil { return "DRONE AIRBORNE" }
         return refusal(cost:offer.cost)
     }
     /// Calls in support at world x. Supply crates may land anywhere on the map.
@@ -199,7 +202,7 @@ extension World {
         guard x >= 0 && x <= Self.width else { return false }
         if let reason = refusal(offer) {
             let wait = cooldown(offer.kind)
-            status = wait > 0 ? "\(offer.name) ON COOLDOWN · READY IN \(Int(wait.rounded(.up)))S"
+            status = reason == "DRONE AIRBORNE" ? "ONE DRONE AT A TIME · DETONATE THE ONE IN THE AIR FIRST" : wait > 0 ? "\(offer.name) ON COOLDOWN · READY IN \(Int(wait.rounded(.up)))S"
                 : "SUPPORT DENIED · \(reason) FOR \(offer.name)"
             onSound?(SoundEvent(cue:.cease))
             return false
@@ -230,6 +233,9 @@ extension World {
             bombers.append(bomber); bombed = false
             onSound?(SoundEvent(cue:.plane,x:Self.onMap(bomber.x)))
             status = "FIREBOMB RUN INBOUND · -\(offer.cost) CR · C-130 APPROACHING FROM THE \(h > 0 ? "WEST" : "EAST")"
+        case .drone:
+            launchDrone(toward:x)
+            status = "DRONE INBOUND · -\(offer.cost) CR · FLYING IN FROM THE \(drone!.heading > 0 ? "WEST" : "EAST")"
         }
         onSound?(SoundEvent(cue:.order,x:x))
         return true

@@ -1,14 +1,14 @@
 # Raining Hell — early alpha
 
-**Version 0.3.0-rc.2 is a release candidate for an unfinished game in active development.**
+**Version 0.3.0-rc.3 is a release candidate for an unfinished game in active development.**
 
 A native macOS 2D voxel destruction sandbox prototype. **UI & graphics are subject to change.** Audio and gameplay are also provisional. No engine installation, downloaded assets, or runtime dependencies needed.
 
 ## Play
 
-Open **dist/Raining Hell.app**, or mount **dist/Raining Hell-macOS.dmg** and drag the app into Applications. **dist/Raining Hell-macOS-portable.zip** contains the same self-contained app plus this README and release notes; unzip and run it from any folder. Versioned release candidates are in **dist/releases/0.3.0-rc.2/**. Quit an older running copy before launching the new one.
+Open **dist/Raining Hell.app**, or mount **dist/Raining Hell-macOS.dmg** and drag the app into Applications. **dist/Raining Hell-macOS-portable.zip** contains the same self-contained app plus this README and release notes; unzip and run it from any folder. Versioned release candidates are in **dist/releases/0.3.0-rc.3/**. Quit an older running copy before launching the new one.
 
-Requires macOS 12 or newer. The universal binary supports Apple Silicon and Intel Macs. This local development build is ad-hoc signed, not Developer ID signed or notarized. If a downloaded copy is blocked, use macOS Privacy & Security → Open Anyway after trying to launch it.
+Requires macOS 12 or newer. The app is built for Apple Silicon Macs. This local development build is ad-hoc signed, not Developer ID signed or notarized. If a downloaded copy is blocked, use macOS Privacy & Security → Open Anyway after trying to launch it.
 
 | Control | Action |
 | --- | --- |
@@ -86,7 +86,7 @@ Install Apple's Xcode Command Line Tools and Python 3, then run:
 ./scripts/release.sh
 ```
 
-The build generates the icon and original WAV assets, compiles optimized arm64 and x86_64 binaries, combines them into a universal app, applies an ad-hoc signature, and runs the gameplay, structural physics, and audio checks. Packaging produces a compressed drag-to-Applications DMG and a portable ZIP.
+The build generates the icon and original WAV assets, compiles an optimized arm64 binary, applies an ad-hoc signature, and runs the gameplay, structural physics, and audio checks. Packaging produces a compressed drag-to-Applications DMG and a portable ZIP.
 
 ```sh
 "dist/Raining Hell.app/Contents/MacOS/RainingHell" --self-test
@@ -101,6 +101,6 @@ The build generates the icon and original WAV assets, compiles optimized arm64 a
 
 See **RELEASE_NOTES.md** for this candidate's changes and limitations. `scripts/release.sh` builds and stages local artifacts only: it does not tag a commit, push code, upload files, or publish a release. The candidate folder contains versioned DMG and portable ZIP files, README, release notes, and SHA256SUMS.txt. From that folder, run `shasum -a 256 -c SHA256SUMS.txt` to verify the downloads.
 
-These are development-signed packages. For a normal public macOS distribution, the remaining signing step is to sign with the project's Developer ID certificate, submit the app/DMG to Apple's notarization service, staple the ticket, then regenerate package checksums. No signing credentials are included in the repository. Wider release should also include listening/playtesting on Intel hardware and the minimum supported macOS version.
+These are development-signed packages. For a normal public macOS distribution, the remaining signing step is to sign with the project's Developer ID certificate, submit the app/DMG to Apple's notarization service, staple the ticket, then regenerate package checksums. No signing credentials are included in the repository. Wider release should also include listening/playtesting on the minimum supported macOS version.
 
 No progress is saved; each launch starts a fresh map. Volume/mute preferences are stored in macOS defaults under `games.raininghell.prototype`.
