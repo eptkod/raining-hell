@@ -104,3 +104,7 @@ See **RELEASE_NOTES.md** for this candidate's changes and limitations. `scripts/
 These are development-signed packages. For a normal public macOS distribution, the remaining signing step is to sign with the project's Developer ID certificate, submit the app/DMG to Apple's notarization service, staple the ticket, then regenerate package checksums. No signing credentials are included in the repository. Wider release should also include listening/playtesting on the minimum supported macOS version.
 
 No progress is saved; each launch starts a fresh map. Volume/mute preferences are stored in macOS defaults under `games.raininghell.prototype`.
+
+## More from eptkod
+
+More games and apps by eptkod, including free browser games, are at **[home.eptkod.com](https://home.eptkod.com/)**.
